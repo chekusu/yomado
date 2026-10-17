@@ -3,6 +3,7 @@
 
 #import <AppKit/AppKit.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import "AppWorkspaceAccess.h"
 
 NS_ASSUME_NONNULL_BEGIN
 FOUNDATION_EXPORT NSString * const YMAppWorkspaceErrorDomain;
@@ -14,9 +15,14 @@ FOUNDATION_EXPORT NSString * const YMAppWorkspaceErrorDomain;
 // yomado must call restoreAll: before removing its displays. Never instantiate
 // this manager in the synthetic UI preview path.
 @interface YMAppWorkspace : NSObject
+- (instancetype)initWithWindowAccess:(id<YMWorkspaceWindowAccess>)access;
 @property(nonatomic, copy, readonly) NSArray<NSDictionary *> *rows;
 @property(nonatomic, copy, readonly) NSString *statusText;
 @property(nonatomic, readonly) BOOL accessibilityTrusted;
+@property(nonatomic, copy, nullable) void (^inventoryDidChange)(void);
+// Complete published observation matching current topology/permission algebra.
+// Pending, failed, or expired inventory is never ready for close/export gates.
+@property(nonatomic, readonly) BOOL inventoryReady;
 @property(nonatomic, readonly) BOOL needsRestoreBeforeRemovingVirtualDisplay;
 - (void)refreshWithVirtualDisplayIDs:(NSArray<NSNumber *> *)displayIDs
                    displaySnapshot:(NSArray<NSDictionary *> *)snapshot;

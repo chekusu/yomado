@@ -76,7 +76,8 @@ ym_flags=(
   "$ym_root/app/Yomado.m" "$ym_root/app/ControlUI.m" "$ym_root/app/WindowRecovery.m" \
   "$ym_root/app/UpdateChecker.m" "$ym_root/app/MenuBarIcon.m" "$ym_root/app/PanelPresentation.m" \
   "$ym_root/app/AutomaticUpdater.m" "$ym_root/app/UpdateWorkspaceRecovery.m" \
-  "$ym_root/app/AppWorkspace.m" "$ym_root/app/AppWorkspaceView.m" "$ym_root/bridge/VDVirtualDisplay.m" \
+  "$ym_root/app/AppWorkspace.m" "$ym_root/app/AppWorkspaceAccess.m" \
+  "$ym_root/app/AppWorkspaceView.m" "$ym_root/bridge/VDVirtualDisplay.m" \
   "$ym_root/bridge/YMDisplayTopology.m" \
   -framework AppKit -framework CoreGraphics -framework ColorSync -framework IOKit -framework Carbon -framework ApplicationServices -framework QuartzCore \
   -F "$ym_sparkle" -framework Sparkle -Wl,-rpath,@executable_path/../Frameworks \

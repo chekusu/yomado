@@ -11,7 +11,8 @@ xcrun clang -fobjc-arc -Wall -Wextra -Werror -g0 -mmacosx-version-min=14.0 \
   "$ym_ci_production/app/ControlUI.m" "$ym_ci_production/app/WindowRecovery.m" \
   "$ym_ci_production/app/UpdateChecker.m" "$ym_ci_production/app/MenuBarIcon.m" "$ym_ci_production/app/PanelPresentation.m" \
   "$ym_ci_production/app/AutomaticUpdater.m" "$ym_ci_production/app/UpdateWorkspaceRecovery.m" \
-  "$ym_ci_production/app/AppWorkspace.m" "$ym_ci_production/app/AppWorkspaceView.m" \
+  "$ym_ci_production/app/AppWorkspace.m" "$ym_ci_production/app/AppWorkspaceAccess.m" \
+  "$ym_ci_production/app/AppWorkspaceView.m" \
   "$ym_ci_production/bridge/VDVirtualDisplay.m" "$ym_ci_production/bridge/YMDisplayTopology.m" \
   -framework AppKit -framework CoreGraphics -framework IOKit -framework Carbon -framework ApplicationServices -framework QuartzCore -framework ColorSync \
   -F "$ym_ci_sparkle" -framework Sparkle "-Wl,-rpath,$ym_ci_sparkle" \
