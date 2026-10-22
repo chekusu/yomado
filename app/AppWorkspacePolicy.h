@@ -142,6 +142,24 @@ static inline BOOL YMWorkspaceMatchesSource(NSDictionary *window, NSNumber *sour
     return [window[@"displayID"] isKindOfClass:NSNumber.class] &&
         [window[@"displayID"] unsignedIntValue] == sourceFilter.unsignedIntValue;
 }
+// "「Marvelous Designer」1 个窗口、「文本编辑」3 个窗口": per-app counts of
+// windows that will be left for macOS to relocate, merged by app name.
+static inline NSString *YMWorkspaceUnmovableSummary(NSArray<NSDictionary *> *items) {
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    NSMutableDictionary<NSString *, NSNumber *> *counts = [NSMutableDictionary dictionary];
+    for (NSDictionary *item in items) {
+        if (![item isKindOfClass:NSDictionary.class]) continue;
+        NSString *name = [item[@"appName"] isKindOfClass:NSString.class] && [item[@"appName"] length] ? item[@"appName"] : @"应用";
+        NSUInteger count = [item[@"count"] isKindOfClass:NSNumber.class] ? [item[@"count"] unsignedIntegerValue] : 0;
+        if (!count) continue;
+        if (!counts[name]) [names addObject:name];
+        counts[name] = @(counts[name].unsignedIntegerValue + count);
+    }
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    for (NSString *name in names)
+        [parts addObject:[NSString stringWithFormat:@"「%@」%lu 个窗口", name, (unsigned long)counts[name].unsignedIntegerValue]];
+    return [parts componentsJoinedByString:@"、"];
+}
 // AX movement can settle before CoreGraphics publishes the new window frame.
 // An old physical CG frame alone must not retire a freshly captured origin.
 // Confirm a manual physical return only when both independent observations

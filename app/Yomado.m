@@ -12,6 +12,7 @@
 #import "ControlUI.h"
 #import "WindowRecovery.h"
 #import "AppWorkspace.h"
+#import "AppWorkspacePolicy.h"
 #import "AppWorkspaceView.h"
 #import "AutomaticUpdater.h"
 #import "UpdateWorkspaceRecovery.h"
@@ -303,6 +304,28 @@ static os_log_t YMQuitLog(void) {
 - (NSApplicationTerminateReply)refuseTermination:(NSString *)reason {
     [self logQuitStep:[@"quit refused: " stringByAppendingString:reason]];
     return NSTerminateCancel;
+}
+// Dialogs, splash screens and tool windows cannot be matched to a movable
+// window, so they cannot return to a remembered origin. Ask once before
+// leaving them for macOS to relocate when the screens are removed.
+- (BOOL)confirmUnmovableWindowsOnDisplayIDs:(NSArray<NSNumber *> *)displayIDs {
+    NSMutableArray *items = [NSMutableArray array];
+    for (NSNumber *ID in displayIDs) [items addObjectsFromArray:[self.appWorkspace unmovableWindowsForDisplayID:ID.unsignedIntValue] ?: @[]];
+    NSString *summary = YMWorkspaceUnmovableSummary(items);
+    if (!summary.length) return YES;
+    [self logQuitStep:[@"windows that cannot return: " stringByAppendingString:summary]];
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"有窗口无法挪回原位";
+    alert.informativeText = [NSString stringWithFormat:@"%@多半是弹窗、启动画面或工具窗，yomado 无法可靠地把它们挪回原位。其他窗口照常返回原位。\n继续关闭后，macOS 会把这些窗口移到剩下的屏幕上，位置可能不同。", summary];
+    [alert addButtonWithTitle:@"继续关闭"];
+    [alert addButtonWithTitle:@"取消"];
+    [self showWindow:nil];
+    if ([alert runModal] != NSAlertFirstButtonReturn) {
+        [self logQuitStep:@"user kept the screens because of windows that cannot return"];
+        return NO;
+    }
+    for (NSNumber *ID in displayIDs) [self.appWorkspace allowUnmovableWindowsOnDisplayID:ID.unsignedIntValue];
+    return YES;
 }
 - (void)resumeTerminationAfterTopologyRecovery:(BOOL)recovered {
     BOOL requested = self.terminationAfterTopologyRecovery;
@@ -1705,6 +1728,7 @@ static os_log_t YMQuitLog(void) {
     }
     VDVirtualDisplay *closing = self.virtualDisplay;
     if (!closing.isCreated) { [self logQuitStep:@"close skipped: selected screen is not running"]; return; }
+    if (![self confirmUnmovableWindowsOnDisplayIDs:@[@(closing.displayID)]]) return;
     if (![self restoreApplicationsForDisplayID:closing.displayID]) {
         [self logQuitStep:@"close stopped: windows did not return to the physical screen"]; return;
     }
@@ -1790,6 +1814,10 @@ static os_log_t YMQuitLog(void) {
         return [self refuseTermination:@"screen-off trial still restoring"];
     NSArray<YMManagedDisplay *> *active = [self activeProfiles];
     [self logQuitStep:[NSString stringWithFormat:@"quit requested with %lu running screen(s)", (unsigned long)active.count]];
+    NSMutableArray<NSNumber *> *activeIDs = [NSMutableArray array];
+    for (YMManagedDisplay *profile in active) [activeIDs addObject:@(profile.display.displayID)];
+    if (![self confirmUnmovableWindowsOnDisplayIDs:activeIDs])
+        return [self refuseTermination:@"the user kept the screens because of windows that cannot return"];
     // Restore every workspace before removing any; a failure leaves the whole
     // virtual topology available for manual recovery.
     for (YMManagedDisplay *profile in active) {

@@ -44,6 +44,13 @@ FOUNDATION_EXPORT NSString * const YMAppWorkspaceErrorDomain;
 - (BOOL)restoreDisplayID:(CGDirectDisplayID)displayID error:(NSError * _Nullable * _Nullable)error;
 - (BOOL)restoreAll:(NSError * _Nullable * _Nullable)error;
 - (BOOL)needsRestoreForDisplayID:(CGDirectDisplayID)displayID;
+// Before closing a display: per-app counts ({appName, count}) of visible
+// windows that cannot be matched to a movable ordinary window, such as
+// dialogs, splash screens and tool windows. Read-only; never moves a window.
+- (NSArray<NSDictionary *> *)unmovableWindowsForDisplayID:(CGDirectDisplayID)displayID;
+// After the user agrees, restoring this display returns the matched windows
+// and leaves the rest for macOS to relocate when the display is removed.
+- (void)allowUnmovableWindowsOnDisplayID:(CGDirectDisplayID)displayID;
 // Update-only handoff. These methods preserve existing physical origins for
 // exact extant windows, never application-level matching or content state.
 - (nullable NSArray<NSDictionary *> *)restartOriginCheckpointsWithError:(NSError * _Nullable * _Nullable)error;

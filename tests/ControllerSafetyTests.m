@@ -104,6 +104,7 @@
 - (void)reportTopologyError:(NSError *)error { (void)error; self.reports++; }
 - (void)powerAssertions:(BOOL)on { self.systemAssertion = self.displayAssertion = on && !self.powerFails ? 1 : 0; }
 - (BOOL)restoreApplicationsForDisplayID:(CGDirectDisplayID)displayID { (void)displayID; return YES; }
+- (BOOL)confirmUnmovableWindowsOnDisplayIDs:(NSArray<NSNumber *> *)displayIDs { (void)displayIDs; return YES; }
 - (void)showWindow:(id)sender {
     self.showCalls++;
     if (self.useRealPanelPresentation) [super showWindow:sender];
