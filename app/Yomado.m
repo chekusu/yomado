@@ -319,6 +319,10 @@ static os_log_t YMQuitLog(void) {
     alert.informativeText = [NSString stringWithFormat:@"%@多半是弹窗、启动画面或工具窗，yomado 无法可靠地把它们挪回原位。其他窗口照常返回原位。\n继续关闭后，macOS 会把这些窗口移到剩下的屏幕上，位置可能不同。", summary];
     [alert addButtonWithTitle:@"继续关闭"];
     [alert addButtonWithTitle:@"取消"];
+    // The prompt can appear while the person is typing elsewhere. Return must
+    // not leave windows behind; only an explicit click on 继续关闭 does.
+    alert.buttons.firstObject.keyEquivalent = @"";
+    alert.buttons.lastObject.keyEquivalent = @"\r";
     [self showWindow:nil];
     if ([alert runModal] != NSAlertFirstButtonReturn) {
         [self logQuitStep:@"user kept the screens because of windows that cannot return"];
