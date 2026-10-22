@@ -4,6 +4,7 @@
 #import <Carbon/Carbon.h>
 #import <dlfcn.h>
 #import <signal.h>
+#import <os/log.h>
 #import "VDVirtualDisplay.h"
 #import "YMDisplayTopology.h"
 #import "LayoutPolicy.h"
@@ -286,9 +287,27 @@ static NSView *YMSpacer(void) {
         }
     });
 }
+// Quit and close failures used to leave their reason only in status labels
+// that are not shown. Log each one so a refused quit can be traced with
+// `log show --predicate 'subsystem == "dev.chekusu.yomado"'`.
+static os_log_t YMQuitLog(void) {
+    static os_log_t quitLog;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ quitLog = os_log_create("dev.chekusu.yomado", "quit"); });
+    return quitLog;
+}
+- (void)logQuitStep:(NSString *)step {
+    os_log(YMQuitLog(), "%{public}@ | status: %{public}@ | detail: %{public}@", step,
+        self.statusLabel.stringValue ?: @"", self.detailLabel.stringValue ?: @"");
+}
+- (NSApplicationTerminateReply)refuseTermination:(NSString *)reason {
+    [self logQuitStep:[@"quit refused: " stringByAppendingString:reason]];
+    return NSTerminateCancel;
+}
 - (void)resumeTerminationAfterTopologyRecovery:(BOOL)recovered {
     BOOL requested = self.terminationAfterTopologyRecovery;
     self.terminationAfterTopologyRecovery = NO;
+    if (requested) [self logQuitStep:recovered ? @"quit continues after a screen was removed" : @"quit stopped: display recovery failed"];
     if (requested && recovered) dispatch_async(dispatch_get_main_queue(), ^{ [NSApp terminate:nil]; });
 }
 - (void)recoverTopology:(YMDisplayTopologySnapshot *)snapshot removedID:(CGDirectDisplayID)removedID completion:(void (^)(BOOL, NSError *))completion {
@@ -1675,13 +1694,20 @@ static NSView *YMSpacer(void) {
 }
 - (void)stop:(id)sender {
     (void)sender;
-    if (self.previewMode || self.updateWorkspaceBusy || self.displayOperationInProgress || self.appOperationInProgress) return;
-    if (self.topologyRecoverySnapshot) { [self retryTopologyRecovery:nil]; return; }
+    if (self.previewMode) return;
+    if (self.updateWorkspaceBusy || self.displayOperationInProgress || self.appOperationInProgress) {
+        [self logQuitStep:@"close skipped: another operation is running"]; return;
+    }
+    if (self.topologyRecoverySnapshot) { [self logQuitStep:@"close retries display recovery"]; [self retryTopologyRecovery:nil]; return; }
     if (self.armed || self.preparing || self.layoutChangedForTrial) [self restore:nil];
-    if (self.armed || self.preparing || self.restoring || self.layoutChangedForTrial || self.recoveryRequested) return;
+    if (self.armed || self.preparing || self.restoring || self.layoutChangedForTrial || self.recoveryRequested) {
+        [self logQuitStep:@"close skipped: screen-off trial still restoring"]; return;
+    }
     VDVirtualDisplay *closing = self.virtualDisplay;
-    if (!closing.isCreated) return;
-    if (![self restoreApplicationsForDisplayID:closing.displayID]) return;
+    if (!closing.isCreated) { [self logQuitStep:@"close skipped: selected screen is not running"]; return; }
+    if (![self restoreApplicationsForDisplayID:closing.displayID]) {
+        [self logQuitStep:@"close stopped: windows did not return to the physical screen"]; return;
+    }
     BOOL physicalActive = NO;
     for (NSDictionary *item in DisplaySnapshot()) {
         CGDirectDisplayID ident = [item[@"displayID"] unsignedIntValue];
@@ -1697,6 +1723,7 @@ static NSView *YMSpacer(void) {
     if (!mainReady) {
         self.statusLabel.stringValue = @"保留虚拟屏：尚无可用的实体主屏";
         self.detailLabel.stringValue = @"请先打开或重新连接实体显示器，再关闭或退出。";
+        [self logQuitStep:@"close stopped: no physical main display"];
         return;
     }
     self.displayOperationInProgress = YES;
@@ -1707,8 +1734,10 @@ static NSView *YMSpacer(void) {
     if (!survivors) {
         self.displayOperationInProgress = NO;
         [self reportTopologyError:topologyError];
+        [self logQuitStep:@"close stopped: display arrangement snapshot failed"];
         return;
     }
+    [self logQuitStep:[NSString stringWithFormat:@"closing screen %u", removedID]];
     [self finishWatchdog];
     self.selectedProfile.topologyVerified = NO;
     [closing destroy];
@@ -1742,7 +1771,7 @@ static NSView *YMSpacer(void) {
             [self.automaticUpdater installationWasDeferredWithError:error ?: [NSError errorWithDomain:YMAutomaticUpdaterErrorDomain code:104 userInfo:@{NSLocalizedDescriptionKey:@"窗口已变化，点击检查更新以重新保存位置后安装。"}]];
             [self updateInventory];
             [self refreshUpdateUI];
-            return NSTerminateCancel;
+            return [self refuseTermination:@"update installation was deferred"];
         }
         [self storeUpdatePanelState];
         [self writeStateEnding:YES];
@@ -1750,16 +1779,23 @@ static NSView *YMSpacer(void) {
         // ordinary quit's return-all-to-physical-display workflow here.
         return NSTerminateNow;
     }
-    if (self.updateWorkspaceBusy || self.displayOperationInProgress || self.appOperationInProgress) return NSTerminateCancel;
-    if (self.topologyRecoverySnapshot) { self.terminationAfterTopologyRecovery = YES; [self retryTopologyRecovery:nil]; return NSTerminateCancel; }
+    if (self.updateWorkspaceBusy || self.displayOperationInProgress || self.appOperationInProgress)
+        return [self refuseTermination:@"another operation is running"];
+    if (self.topologyRecoverySnapshot) {
+        self.terminationAfterTopologyRecovery = YES; [self retryTopologyRecovery:nil];
+        return [self refuseTermination:@"display recovery is pending; retrying it first"];
+    }
     if (self.armed || self.preparing || self.layoutChangedForTrial) [self restore:nil];
-    if (self.armed || self.preparing || self.restoring || self.layoutChangedForTrial || self.recoveryRequested) return NSTerminateCancel;
+    if (self.armed || self.preparing || self.restoring || self.layoutChangedForTrial || self.recoveryRequested)
+        return [self refuseTermination:@"screen-off trial still restoring"];
     NSArray<YMManagedDisplay *> *active = [self activeProfiles];
+    [self logQuitStep:[NSString stringWithFormat:@"quit requested with %lu running screen(s)", (unsigned long)active.count]];
     // Restore every workspace before removing any; a failure leaves the whole
     // virtual topology available for manual recovery.
     for (YMManagedDisplay *profile in active) {
         if (![self restoreApplicationsForDisplayID:profile.display.displayID]) {
-            [self showWindow:nil]; return NSTerminateCancel;
+            [self showWindow:nil];
+            return [self refuseTermination:[NSString stringWithFormat:@"windows on screen %u did not return", profile.display.displayID]];
         }
     }
     if (active.count) {
@@ -1772,10 +1808,15 @@ static NSView *YMSpacer(void) {
         if (!self.displayOperationInProgress) {
             self.terminationAfterTopologyRecovery = NO;
             if (profile.display.isCreated || self.topologyRecoverySnapshot) [self showWindow:nil];
+            return [self refuseTermination:@"the first screen could not be closed"];
         }
+        // Not a refusal: removal is asynchronous and quit resumes afterwards.
         return NSTerminateCancel;
     }
-    if (self.windowRecovery.needsRestoreBeforeRemovingVirtualDisplay) { [self showWindow:nil]; return NSTerminateCancel; }
+    if (self.windowRecovery.needsRestoreBeforeRemovingVirtualDisplay) {
+        [self showWindow:nil];
+        return [self refuseTermination:@"WeChat must return to the physical screen first"];
+    }
     [self writeStateEnding:YES];
     return NSTerminateNow;
 }

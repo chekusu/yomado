@@ -262,7 +262,9 @@ static BOOL YMWOrdinaryWindow(id element) {
         [result addObject:@{@"element": window, @"frame": frame, @"windowID": entry[@"windowID"], @"displayID": entry[@"displayID"]}];
     }
     if (result.count != visible.count) {
-        [self fail:error code:7 text:@"部分窗口无法可靠匹配或移动。请关闭弹窗、展开普通窗口后重试；尚未继续移屏。"]; return nil;
+        NSString *name = app.localizedName.length ? app.localizedName : (app.bundleIdentifier ?: @"应用");
+        [self fail:error code:7 text:[NSString stringWithFormat:@"「%@」有 %lu 个窗口无法可靠匹配或移动（常见于弹窗、启动画面或工具窗）。请关闭这些窗口、展开普通窗口后重试；尚未继续移屏。",
+            name, (unsigned long)(visible.count - result.count)]]; return nil;
     }
     return result;
 }
