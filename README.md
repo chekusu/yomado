@@ -138,11 +138,13 @@ An earlier single-display WeChat move-and-return test restored its original plac
 
 ## Physical monitors
 
-The current control panel keeps physical display outputs enabled and does not expose the earlier physical-output trial. Creating or closing a virtual screen does not request that a physical monitor turn off.
+Creating or closing a virtual screen does not request that a physical monitor turn off.
 
-For a later attended monitor-off test, first verify actual screenshots and reversible input in the target app while the physical monitors are on. The monitor can then be switched off using its own controls, while the Mac remains awake and the desktop session remains available. Check the physical monitor and test the target app again. This stage has not been validated; an available virtual display alone does not prove that the agent can keep working with the monitor off.
+Display sleep is not a way to leave an agent working: on a Mac set to require a password immediately after the display turns off, `pmset displaysleepnow` locked the session within a minute, and nothing on the virtual screens could be operated until it was unlocked. yomado's screens and wake assertions survived, but the lock stopped the work.
 
-A black screenshot or a software-disabled output does not establish monitor standby or reduced power consumption. yomado cannot cut a monitor’s power or measure its consumption. The legacy recovery helper and CLI display tests remain in the source for development; they are not a physical-monitor power control in this panel.
+**Experimental:** each running screen's menu-bar submenu has **关闭实体屏，只留这块屏…**. After confirmation, yomado makes that virtual screen the main display and disconnects every physical output. Disconnecting an output is not display sleep. Restore the outputs with ⌃⌥⌘R or **恢复实体显示器** in the menu bar; a separate recovery process restores them if yomado exits unexpectedly. The item appears only while the recovery shortcut is registered. If the session stays unlocked, anyone at the Mac can press ⌃⌥⌘R and use it. Whether the session stays unlocked, and how long agents keep working, are still being validated.
+
+A black screenshot or a software-disabled output does not establish monitor standby or reduced power consumption. yomado cannot cut a monitor’s power or measure its consumption. Disconnecting outputs is not a monitor power control.
 
 ## Diagnostics and tests
 

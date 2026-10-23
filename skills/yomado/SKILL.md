@@ -24,7 +24,7 @@ Let the agent prepare its own work screen; the user does not need to create it m
 4. Record the new screen's actual ID/bounds/scale. A renamed running screen can retain its old name in macOS until restarted; do not restart merely to synchronize the name.
 5. Compare the display arrangement and main display with the checkpoint before moving apps. Adding or removing displays can rearrange the desktop in released versions. If an existing screen moved, stop and report the discrepancy; do not continue moving user windows or silently change the main display. Resolve layout only within the user's authority.
 
-Keep physical outputs enabled and a physical display as main during ordinary setup. Do not change power, lock, login or display settings just because the task needs a work screen. Resolution/HiDPI controls apply to a stopped screen; do not stop an occupied screen to change them.
+Keep physical outputs enabled and a physical display as main during ordinary setup. Turning physical outputs off (menu-bar `关闭实体屏，只留这块屏…`) is the user's choice; do not trigger it yourself unless the user asked for it in this task. Never use display sleep (`pmset displaysleepnow`) to darken the screen: with an immediate password requirement it locks the session and stops all agent work. If the session is locked, stop and report; never try to unlock it. Do not change power, lock, login or display settings just because the task needs a work screen. Resolution/HiDPI controls apply to a stopped screen; do not stop an occupied screen to change them.
 
 ## Move only the task's windows
 
