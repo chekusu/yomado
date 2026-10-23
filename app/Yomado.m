@@ -403,6 +403,8 @@ static os_log_t YMQuitLog(void) {
                                                        userInfo:nil repeats:YES];
     [NSWorkspace.sharedWorkspace.notificationCenter addObserver:self selector:@selector(systemWillSleep:)
           name:NSWorkspaceWillSleepNotification object:nil];
+    [NSDistributedNotificationCenter.defaultCenter addObserver:self selector:@selector(screenDidLock:)
+          name:@"com.apple.screenIsLocked" object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(displayParametersChanged:)
           name:NSApplicationDidChangeScreenParametersNotification object:nil];
 }
@@ -1664,6 +1666,11 @@ static os_log_t YMQuitLog(void) {
     }
 }
 - (void)systemWillSleep:(NSNotification *)notification { (void)notification; [self restore:nil]; }
+// The login window must be visible on a physical display.
+- (void)screenDidLock:(NSNotification *)notification {
+    (void)notification;
+    if (self.armed || self.layoutChangedForTrial) [self restore:nil];
+}
 - (BOOL)restoreApplicationsForDisplayID:(CGDirectDisplayID)displayID {
     if (self.appOperationInProgress) return NO;
     self.appOperationInProgress = YES;
