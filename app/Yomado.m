@@ -300,8 +300,9 @@ static os_log_t YMQuitLog(void) {
     return quitLog;
 }
 - (void)logQuitStep:(NSString *)step {
-    os_log(YMQuitLog(), "%{public}@ | status: %{public}@ | detail: %{public}@", step,
-        self.statusLabel.stringValue ?: @"", self.detailLabel.stringValue ?: @"");
+    // Callers supply fixed diagnostic events and numeric IDs/counts only.
+    // Localized UI text can include app names, profile names and error details.
+    os_log(YMQuitLog(), "%{public}@", step);
 }
 - (NSApplicationTerminateReply)refuseTermination:(NSString *)reason {
     [self logQuitStep:[@"quit refused: " stringByAppendingString:reason]];
@@ -315,7 +316,15 @@ static os_log_t YMQuitLog(void) {
     for (NSNumber *ID in displayIDs) [items addObjectsFromArray:[self.appWorkspace unmovableWindowsForDisplayID:ID.unsignedIntValue] ?: @[]];
     NSString *summary = YMWorkspaceUnmovableSummary(items);
     if (!summary.length) return YES;
-    [self logQuitStep:[@"windows that cannot return: " stringByAppendingString:summary]];
+    [self logQuitStep:@"unmovable window confirmation required"];
+    if ([self runUnmovableWindowsConfirmation:summary] != NSAlertFirstButtonReturn) {
+        [self logQuitStep:@"user kept the screens because of windows that cannot return"];
+        return NO;
+    }
+    for (NSNumber *ID in displayIDs) [self.appWorkspace allowUnmovableWindowsOnDisplayID:ID.unsignedIntValue];
+    return YES;
+}
+- (NSModalResponse)runUnmovableWindowsConfirmation:(NSString *)summary {
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = @"有窗口无法挪回原位";
     alert.informativeText = [NSString stringWithFormat:@"%@多半是弹窗、启动画面或工具窗，yomado 无法可靠地把它们挪回原位。其他窗口照常返回原位。\n继续关闭后，macOS 会把这些窗口移到剩下的屏幕上，位置可能不同。", summary];
@@ -325,13 +334,8 @@ static os_log_t YMQuitLog(void) {
     // not leave windows behind; only an explicit click on 继续关闭 does.
     alert.buttons.firstObject.keyEquivalent = @"";
     alert.buttons.lastObject.keyEquivalent = @"\r";
-    [self showWindow:nil];
-    if ([alert runModal] != NSAlertFirstButtonReturn) {
-        [self logQuitStep:@"user kept the screens because of windows that cannot return"];
-        return NO;
-    }
-    for (NSNumber *ID in displayIDs) [self.appWorkspace allowUnmovableWindowsOnDisplayID:ID.unsignedIntValue];
-    return YES;
+    // The confirmation must not reopen the control panel behind the alert.
+    return [alert runModal];
 }
 - (void)resumeTerminationAfterTopologyRecovery:(BOOL)recovered {
     BOOL requested = self.terminationAfterTopologyRecovery;
@@ -1724,6 +1728,12 @@ static os_log_t YMQuitLog(void) {
 
 }
 - (void)stop:(id)sender {
+    BOOL scoped = [self.appWorkspace respondsToSelector:@selector(beginCloseTransaction)];
+    if (scoped) [self.appWorkspace beginCloseTransaction];
+    @try { [self stopInCloseTransaction:sender]; }
+    @finally { if (scoped) [self.appWorkspace endCloseTransaction]; }
+}
+- (void)stopInCloseTransaction:(id)sender {
     (void)sender;
     if (self.previewMode) return;
     if (self.updateWorkspaceBusy || self.displayOperationInProgress || self.appOperationInProgress) {
@@ -1794,6 +1804,12 @@ static os_log_t YMQuitLog(void) {
 }
 - (void)quit:(id)sender { (void)sender; [NSApp terminate:nil]; }
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
+    BOOL scoped = [self.appWorkspace respondsToSelector:@selector(beginCloseTransaction)];
+    if (scoped) [self.appWorkspace beginCloseTransaction];
+    @try { return [self applicationShouldTerminateInCloseTransaction:sender]; }
+    @finally { if (scoped) [self.appWorkspace endCloseTransaction]; }
+}
+- (NSApplicationTerminateReply)applicationShouldTerminateInCloseTransaction:(NSApplication *)sender {
     if (self.previewMode) return NSTerminateNow;
     (void)sender;
     if (self.automaticUpdater.installationPending) {
