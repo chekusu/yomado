@@ -50,9 +50,11 @@ static BOOL YMWOrdinaryWindow(id element) {
 @property(nonatomic, strong) NSMutableArray<YMWPlacement *> *placements;
 @property(nonatomic) BOOL inventoryValid;
 @property(nonatomic) BOOL operationInProgress;
-// Displays whose unmatched windows the user agreed to leave for macOS to
-// relocate when the display is removed.
-@property(nonatomic, strong) NSMutableSet<NSNumber *> *unmovableAllowedIDs;
+// Never let a display-wide permission outlive its close attempt or cover a
+// window that was not in the confirmation's inventory.
+@property(nonatomic) NSUInteger closeTransactionDepth;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSSet<NSDictionary *> *> *unmovablePromptWindows;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSSet<NSDictionary *> *> *unmovableAllowedWindows;
 @end
 
 @implementation YMAppWorkspace
@@ -61,7 +63,8 @@ static BOOL YMWOrdinaryWindow(id element) {
     if (!self) return nil;
     _rows = @[]; _ownedIDs = @[]; _displays = @[]; _windows = @[];
     _placements = [NSMutableArray array];
-    _unmovableAllowedIDs = [NSMutableSet set];
+    _unmovablePromptWindows = [NSMutableDictionary dictionary];
+    _unmovableAllowedWindows = [NSMutableDictionary dictionary];
     _statusText = @"拖入已打开的 App，或手动把窗口拖到虚拟屏。原位置只保留到退出 yomado。";
     return self;
 }
@@ -81,7 +84,8 @@ static BOOL YMWOrdinaryWindow(id element) {
     NSMutableOrderedSet *IDs = [NSMutableOrderedSet orderedSet];
     for (id value in displayIDs) if ([value isKindOfClass:NSNumber.class] && [value unsignedIntValue]) [IDs addObject:value];
     self.ownedIDs = IDs.array;
-    [self.unmovableAllowedIDs intersectSet:[NSSet setWithArray:self.ownedIDs]];
+    for (NSNumber *ID in self.unmovableAllowedWindows.allKeys.copy)
+        if (![self.ownedIDs containsObject:ID]) [self.unmovableAllowedWindows removeObjectForKey:ID];
     NSMutableArray *normalized = [NSMutableArray array];
     NSMutableDictionary<NSNumber *, NSScreen *> *screens = [NSMutableDictionary dictionary];
     for (NSScreen *screen in NSScreen.screens) {
@@ -142,7 +146,8 @@ static BOOL YMWOrdinaryWindow(id element) {
         if (!display) continue;
         [windows addObject:@{@"windowID": entry[(__bridge NSString *)kCGWindowNumber], @"pid": @(PID),
             @"bundleIdentifier": app.bundleIdentifier, @"appName": app.localizedName ?: app.bundleIdentifier,
-            @"appURL": app.bundleURL, @"frame": frame, @"displayID": display[@"displayID"],
+            @"appURL": app.bundleURL, @"processLaunchDate": app.launchDate ?: NSNull.null,
+            @"frame": frame, @"displayID": display[@"displayID"],
             @"isVirtual": display[@"isVirtual"]}];
     }
     self.windows = windows; self.inventoryValid = YES;
@@ -203,7 +208,8 @@ static BOOL YMWOrdinaryWindow(id element) {
 - (BOOL)needsRestoreForDisplayID:(CGDirectDisplayID)ID {
     if (![self.ownedIDs containsObject:@(ID)]) return NO;
     if (!self.inventoryValid) return YES;
-    if ([self rowsForDisplayID:ID].count && ![self.unmovableAllowedIDs containsObject:@(ID)]) return YES;
+    for (NSDictionary *window in self.windows)
+        if ([window[@"displayID"] unsignedIntValue] == ID && ![self isApprovedUnmovableWindow:window]) return YES;
     for (YMWPlacement *placement in self.placements) if (placement.lastDisplayID == ID) return YES;
     return NO;
 }
@@ -238,7 +244,10 @@ static BOOL YMWOrdinaryWindow(id element) {
     NSUInteger visibleCount = 0;
     NSArray *result = [self matchedWindowsForApplication:app sourceFilter:filter visibleCount:&visibleCount error:error];
     if (!result || result.count == visibleCount) return result;
-    if (filter.unsignedIntValue && [self.unmovableAllowedIDs containsObject:filter]) return result;
+    BOOL approved = filter.unsignedIntValue != 0;
+    for (NSDictionary *window in [self unmatchedWindowsForApplication:app sourceFilter:filter matched:result])
+        if (![self isApprovedUnmovableWindow:window]) { approved = NO; break; }
+    if (approved) return result;
     NSString *name = app.localizedName.length ? app.localizedName : (app.bundleIdentifier ?: @"应用");
     [self fail:error code:7 text:[NSString stringWithFormat:@"「%@」有 %lu 个窗口无法可靠匹配或移动（常见于弹窗、启动画面或工具窗）。请关闭这些窗口、展开普通窗口后重试；尚未继续移屏。",
         name, (unsigned long)(visibleCount - result.count)]];
@@ -284,31 +293,83 @@ static BOOL YMWOrdinaryWindow(id element) {
     if (visibleCount) *visibleCount = visible.count;
     return result;
 }
+- (NSDictionary *)unmovableIdentityForWindow:(NSDictionary *)window {
+    NSNumber *PID = window[@"pid"], *windowID = window[@"windowID"], *displayID = window[@"displayID"];
+    NSString *bundle = window[@"bundleIdentifier"];
+    NSDate *launchDate = window[@"processLaunchDate"];
+    if (![PID isKindOfClass:NSNumber.class] || PID.intValue <= 0 ||
+        ![windowID isKindOfClass:NSNumber.class] || !windowID.unsignedIntValue ||
+        ![displayID isKindOfClass:NSNumber.class] || !displayID.unsignedIntValue ||
+        ![bundle isKindOfClass:NSString.class] || !bundle.length || ![launchDate isKindOfClass:NSDate.class]) return nil;
+    return @{@"pid": PID, @"windowID": windowID, @"displayID": displayID,
+        @"bundleIdentifier": bundle, @"processLaunchDate": launchDate};
+}
+- (BOOL)isApprovedUnmovableWindow:(NSDictionary *)window {
+    NSDictionary *identity = [self unmovableIdentityForWindow:window];
+    return self.closeTransactionDepth && identity &&
+        [self.unmovableAllowedWindows[window[@"displayID"]] containsObject:identity];
+}
+- (NSArray<NSRunningApplication *> *)runningApplicationsForBundleIdentifier:(NSString *)bundle {
+    return [NSRunningApplication runningApplicationsWithBundleIdentifier:bundle];
+}
+- (NSArray<NSDictionary *> *)unmatchedWindowsForApplication:(NSRunningApplication *)app
+        sourceFilter:(NSNumber *)filter matched:(NSArray<NSDictionary *> *)matched {
+    NSMutableSet *matchedIDs = [NSMutableSet set];
+    for (NSDictionary *window in matched) [matchedIDs addObject:window[@"windowID"]];
+    NSMutableArray *unmatched = [NSMutableArray array];
+    for (NSDictionary *window in self.windows)
+        if ([window[@"pid"] intValue] == app.processIdentifier && YMWorkspaceMatchesSource(window, filter) &&
+            ![matchedIDs containsObject:window[@"windowID"]]) [unmatched addObject:window];
+    return unmatched;
+}
+- (void)beginCloseTransaction {
+    if (self.closeTransactionDepth++ == 0) {
+        [self.unmovablePromptWindows removeAllObjects];
+        [self.unmovableAllowedWindows removeAllObjects];
+    }
+}
+- (void)endCloseTransaction {
+    if (self.closeTransactionDepth && --self.closeTransactionDepth == 0) {
+        [self.unmovablePromptWindows removeAllObjects];
+        [self.unmovableAllowedWindows removeAllObjects];
+    }
+}
 - (NSArray<NSDictionary *> *)unmovableWindowsForDisplayID:(CGDirectDisplayID)ID {
     NSAssert(NSThread.isMainThread, @"App workspace is main-thread only.");
-    if (self.operationInProgress || !self.accessibilityTrusted || ![self.ownedIDs containsObject:@(ID)] ||
-        [self.unmovableAllowedIDs containsObject:@(ID)]) return @[];
+    [self.unmovablePromptWindows removeObjectForKey:@(ID)];
+    if (self.operationInProgress || !self.accessibilityTrusted || ![self.ownedIDs containsObject:@(ID)]) return @[];
     [self refreshInventory];
     if (!self.inventoryValid) return @[];
     NSMutableArray *result = [NSMutableArray array];
+    NSMutableSet *identities = [NSMutableSet set];
     for (NSDictionary *row in [self rowsForDisplayID:ID]) {
         NSString *bundle = row[@"bundleIdentifier"];
         if (!YMWorkspaceGenericRestoreAllowed(bundle)) continue;
         NSUInteger unmatched = 0;
-        for (NSRunningApplication *app in [NSRunningApplication runningApplicationsWithBundleIdentifier:bundle]) {
+        for (NSRunningApplication *app in [self runningApplicationsForBundleIdentifier:bundle]) {
             if (app.terminated) continue;
-            NSUInteger visibleCount = 0;
             // An app that does not answer AX is not listed: the restore itself
             // reports that failure and keeps the display.
-            NSArray *matched = [self matchedWindowsForApplication:app sourceFilter:@(ID) visibleCount:&visibleCount error:NULL];
-            if (matched) unmatched += visibleCount - matched.count;
+            NSArray *matched = [self matchedWindowsForApplication:app sourceFilter:@(ID) visibleCount:NULL error:NULL];
+            if (!matched) continue;
+            for (NSDictionary *window in [self unmatchedWindowsForApplication:app sourceFilter:@(ID) matched:matched]) {
+                if ([self isApprovedUnmovableWindow:window]) continue;
+                unmatched++;
+                NSDictionary *identity = [self unmovableIdentityForWindow:window];
+                if (identity) [identities addObject:identity];
+            }
         }
         if (unmatched) [result addObject:@{@"appName": row[@"appName"], @"count": @(unmatched)}];
     }
+    if (self.closeTransactionDepth) self.unmovablePromptWindows[@(ID)] = identities.copy;
     return result;
 }
 - (void)allowUnmovableWindowsOnDisplayID:(CGDirectDisplayID)ID {
-    if ([self.ownedIDs containsObject:@(ID)]) [self.unmovableAllowedIDs addObject:@(ID)];
+    if (!self.closeTransactionDepth || ![self.ownedIDs containsObject:@(ID)]) return;
+    NSMutableSet *approved = [self.unmovableAllowedWindows[@(ID)] mutableCopy] ?: [NSMutableSet set];
+    [approved unionSet:self.unmovablePromptWindows[@(ID)] ?: [NSSet set]];
+    self.unmovableAllowedWindows[@(ID)] = approved.copy;
+    [self.unmovablePromptWindows removeObjectForKey:@(ID)];
 }
 - (BOOL)displayStillCurrent:(NSDictionary *)display {
     CGDirectDisplayID ID = [display[@"displayID"] unsignedIntValue];

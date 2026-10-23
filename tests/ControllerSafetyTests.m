@@ -66,6 +66,61 @@
 }
 @end
 
+// Exercise production approval/candidate logic with synthetic identities only.
+@interface YMAppWorkspace (YMConfirmationTestDeclarations)
+- (void)refreshInventory;
+- (NSArray *)runningApplicationsForBundleIdentifier:(NSString *)bundle;
+- (NSArray *)matchedWindowsForApplication:(NSRunningApplication *)app sourceFilter:(NSNumber *)filter
+    visibleCount:(NSUInteger *)visibleCount error:(NSError **)error;
+- (NSArray *)candidatesForApplication:(NSRunningApplication *)app sourceFilter:(NSNumber *)filter error:(NSError **)error;
+@end
+@interface YMConfirmationApplication : NSObject
+@property(nonatomic) pid_t processIdentifier;
+@property(nonatomic, copy) NSString *localizedName;
+@property(nonatomic, copy) NSString *bundleIdentifier;
+@property(nonatomic, copy) NSDate *launchDate;
+@property(nonatomic, strong) NSURL *bundleURL;
+@property(nonatomic) BOOL terminated;
+@end
+@implementation YMConfirmationApplication
+- (BOOL)isTerminated { return _terminated; }
+@end
+@interface YMConfirmationWorkspace : YMAppWorkspace
+@property(nonatomic, copy) NSArray<NSDictionary *> *fixtureWindows;
+@property NSArray<NSDictionary *> *fixtureMatched;
+@property YMConfirmationApplication *fixtureApplication;
+@end
+@implementation YMConfirmationWorkspace
+- (BOOL)accessibilityTrusted { return YES; }
+- (void)setFixtureWindows:(NSArray<NSDictionary *> *)windows {
+    _fixtureWindows = windows;
+    [self setValue:windows forKey:@"windows"];
+    [self setValue:@YES forKey:@"inventoryValid"];
+    [self setValue:@[@101, @202] forKey:@"ownedIDs"];
+}
+- (void)refreshInventory {}
+- (NSArray *)rowsForDisplayID:(CGDirectDisplayID)ID {
+    for (NSDictionary *window in self.fixtureWindows)
+        if ([window[@"displayID"] unsignedIntValue] == ID)
+            return @[@{@"bundleIdentifier": self.fixtureApplication.bundleIdentifier,
+                @"appName": self.fixtureApplication.localizedName}];
+    return @[];
+}
+- (NSArray *)runningApplicationsForBundleIdentifier:(NSString *)bundle {
+    return [bundle isEqual:self.fixtureApplication.bundleIdentifier] ? @[self.fixtureApplication] : @[];
+}
+- (NSArray *)matchedWindowsForApplication:(NSRunningApplication *)app sourceFilter:(NSNumber *)filter
+    visibleCount:(NSUInteger *)visibleCount error:(NSError **)error {
+    (void)error;
+    if (visibleCount) {
+        *visibleCount = 0;
+        for (NSDictionary *window in self.fixtureWindows)
+            if ([window[@"pid"] intValue] == app.processIdentifier && YMWorkspaceMatchesSource(window, filter)) (*visibleCount)++;
+    }
+    return self.fixtureMatched ?: @[];
+}
+@end
+
 @interface YMFakeController : ADController
 @property NSUInteger inventoryUpdates;
 @property NSUInteger panelCheckpoints;
@@ -78,6 +133,12 @@
 @property NSUInteger resumedTerminations;
 @property BOOL deferTopologyOperations;
 @property BOOL useRealPanelPresentation;
+@property BOOL useRealUnmovableConfirmation;
+@property BOOL useRealStop;
+@property BOOL restoreApplicationsFails;
+@property NSModalResponse confirmationResponse;
+@property NSUInteger confirmationRuns;
+@property NSMutableArray<NSString *> *quitEvents;
 @property NSMutableArray<NSDictionary *> *pendingTopologyOperations;
 - (void)runNextTopologyOperation;
 @end
@@ -103,8 +164,17 @@
 - (void)saveDisplayProfiles { self.saves++; }
 - (void)reportTopologyError:(NSError *)error { (void)error; self.reports++; }
 - (void)powerAssertions:(BOOL)on { self.systemAssertion = self.displayAssertion = on && !self.powerFails ? 1 : 0; }
-- (BOOL)restoreApplicationsForDisplayID:(CGDirectDisplayID)displayID { (void)displayID; return YES; }
-- (BOOL)confirmUnmovableWindowsOnDisplayIDs:(NSArray<NSNumber *> *)displayIDs { (void)displayIDs; return YES; }
+- (BOOL)restoreApplicationsForDisplayID:(CGDirectDisplayID)displayID { (void)displayID; return !self.restoreApplicationsFails; }
+- (BOOL)confirmUnmovableWindowsOnDisplayIDs:(NSArray<NSNumber *> *)displayIDs {
+    return self.useRealUnmovableConfirmation ? [super confirmUnmovableWindowsOnDisplayIDs:displayIDs] : YES;
+}
+- (NSModalResponse)runUnmovableWindowsConfirmation:(NSString *)summary {
+    (void)summary; self.confirmationRuns++; return self.confirmationResponse;
+}
+- (void)logQuitStep:(NSString *)step {
+    if (!self.quitEvents) self.quitEvents = [NSMutableArray array];
+    [self.quitEvents addObject:step];
+}
 - (void)showWindow:(id)sender {
     self.showCalls++;
     if (self.useRealPanelPresentation) [super showWindow:sender];
@@ -115,6 +185,7 @@
 }
 - (BOOL)writeStateEnding:(BOOL)end { (void)end; return YES; }
 - (void)stop:(id)sender {
+    if (self.useRealStop) { [super stop:sender]; return; }
     (void)sender; self.stopCalls++;
     // The termination decision is production logic. This boundary models the
     // actual stop outcome: the last owned output is gone, recovery still fails.
@@ -394,8 +465,99 @@ static YMFakeController *Controller(YMFakeTopology **t, YMFakeDisplay **d, YMMan
     c.displayProfiles=[NSMutableArray arrayWithArray:@[*s,*p]]; c.selectedProfile=*p; c.virtualDisplay=*d;
     return c;
 }
+static NSDictionary *ConfirmationWindow(NSRunningApplication *app, CGWindowID ID, CGDirectDisplayID displayID) {
+    return @{@"pid": @(app.processIdentifier), @"windowID": @(ID), @"displayID": @(displayID),
+        @"bundleIdentifier": app.bundleIdentifier ?: @"test.fixture.editor",
+        @"processLaunchDate": app.launchDate ?: [NSDate dateWithTimeIntervalSince1970:123]};
+}
+static YMConfirmationWorkspace *ConfirmationWorkspace(void) {
+    YMConfirmationWorkspace *workspace = [YMConfirmationWorkspace new];
+        workspace.fixtureApplication = [YMConfirmationApplication new];
+    workspace.fixtureApplication.processIdentifier = 77;
+    workspace.fixtureApplication.localizedName = @"Private fixture application";
+    workspace.fixtureApplication.bundleIdentifier = @"test.fixture.editor";
+    workspace.fixtureApplication.launchDate = [NSDate dateWithTimeIntervalSince1970:123];
+    workspace.fixtureApplication.bundleURL = [NSURL URLWithString:@"file:///tmp/test-fixture.app"];
+    workspace.fixtureWindows = @[ConfirmationWindow((NSRunningApplication *)(id)workspace.fixtureApplication, 1, 101)];
+    return workspace;
+}
+static void TestCloseConfirmationScope(void) {
+    YMConfirmationWorkspace *workspace = ConfirmationWorkspace();
+    NSRunningApplication *app = (NSRunningApplication *)(id)workspace.fixtureApplication;
+    [workspace beginCloseTransaction];
+    Expect([workspace unmovableWindowsForDisplayID:101].count == 1, "unmatched window is included in confirmation");
+    [workspace allowUnmovableWindowsOnDisplayID:101];
+    NSError *error = nil;
+    Expect([workspace candidatesForApplication:app sourceFilter:@101 error:&error] != nil,
+        "approved unmatched identity allows matched candidates to return");
+    Expect(![workspace needsRestoreForDisplayID:101], "approved exact unmatched identity can remain for display removal");
+    [workspace beginCloseTransaction];
+    Expect([workspace unmovableWindowsForDisplayID:101].count == 0, "nested stop reuses the current close confirmation");
+    [workspace endCloseTransaction];
+    Expect(![workspace needsRestoreForDisplayID:101], "nested stop does not revoke its enclosing close approval");
+    workspace.fixtureWindows = @[ConfirmationWindow((NSRunningApplication *)(id)workspace.fixtureApplication, 1, 101), ConfirmationWindow((NSRunningApplication *)(id)workspace.fixtureApplication, 2, 101)];
+    Expect([workspace needsRestoreForDisplayID:101], "new window on approved display still requires return");
+    Expect([workspace candidatesForApplication:app sourceFilter:@101 error:&error] == nil && error.code == 7,
+        "new unmatched identity cannot inherit the display approval");
+    [workspace endCloseTransaction];
+    workspace.fixtureWindows = @[ConfirmationWindow((NSRunningApplication *)(id)workspace.fixtureApplication, 1, 101)];
+    Expect([workspace needsRestoreForDisplayID:101], "ending a failed close revokes approval while the display remains");
+    [workspace beginCloseTransaction];
+    Expect([workspace unmovableWindowsForDisplayID:101].count == 1, "next close asks again for unchanged unmatched window");
+    workspace.fixtureWindows = @[ConfirmationWindow((NSRunningApplication *)(id)workspace.fixtureApplication, 1, 101), ConfirmationWindow((NSRunningApplication *)(id)workspace.fixtureApplication, 2, 101)];
+    [workspace allowUnmovableWindowsOnDisplayID:101];
+    Expect([workspace candidatesForApplication:app sourceFilter:@101 error:&error] == nil,
+        "window arriving while the confirmation is open is excluded from approval");
+    workspace.fixtureMatched = @[@{@"windowID": @2}];
+    Expect([workspace candidatesForApplication:app sourceFilter:@101 error:&error].count == 1,
+        "ordinary matching window is returned even beside approved unmatched window");
+    Expect([workspace needsRestoreForDisplayID:101], "matching ordinary window cannot be skipped by final inventory check");
+    workspace.fixtureMatched = @[];
+    NSMutableDictionary *relaunched = [ConfirmationWindow((NSRunningApplication *)(id)workspace.fixtureApplication, 1, 101) mutableCopy];
+    relaunched[@"processLaunchDate"] = [NSDate dateWithTimeIntervalSince1970:456];
+    workspace.fixtureWindows = @[relaunched];
+    Expect([workspace candidatesForApplication:app sourceFilter:@101 error:&error] == nil,
+        "reused process and window IDs from a different launch cannot inherit approval");
+    workspace.fixtureWindows = @[ConfirmationWindow((NSRunningApplication *)(id)workspace.fixtureApplication, 1, 202)];
+    Expect([workspace needsRestoreForDisplayID:202], "approval cannot transfer to another display");
+    [workspace endCloseTransaction];
+    [workspace allowUnmovableWindowsOnDisplayID:202];
+    Expect([workspace needsRestoreForDisplayID:202], "approval outside a close transaction has no effect");
+
+    YMFakeTopology *topology; YMFakeDisplay *display; YMManagedDisplay *profile, *sibling;
+    YMFakeController *controller = Controller(&topology, &display, &profile, &sibling);
+    workspace = ConfirmationWorkspace(); controller.appWorkspace = workspace;
+    controller.useRealUnmovableConfirmation = YES;
+    controller.confirmationResponse = NSAlertSecondButtonReturn;
+    controller.useRealStop = YES;
+    controller.displayProfiles = [NSMutableArray arrayWithObject:sibling];
+    controller.selectedProfile = sibling; controller.virtualDisplay = sibling.display;
+    [controller stop:nil];
+    Expect(controller.confirmationRuns == 1 && controller.showCalls == 0,
+        "cancelled close shows confirmation without opening the control panel");
+    Expect(sibling.display.isCreated && [workspace needsRestoreForDisplayID:101],
+        "cancelled close keeps display and grants no window exemption");
+    controller.confirmationResponse = NSAlertFirstButtonReturn;
+    controller.restoreApplicationsFails = YES;
+    [controller stop:nil];
+    Expect(controller.confirmationRuns == 2 && [workspace needsRestoreForDisplayID:101],
+        "failed window return clears approval through production stop finally");
+    [controller stop:nil];
+    Expect(controller.confirmationRuns == 3, "retry after failed close presents a new confirmation");
+    Expect([controller applicationShouldTerminate:(NSApplication *)(id)[NSObject new]] == NSTerminateCancel && [workspace needsRestoreForDisplayID:101],
+        "failed quit also clears approval through production termination finally");
+    NSUInteger previousRuns = controller.confirmationRuns;
+    [controller applicationShouldTerminate:(NSApplication *)(id)[NSObject new]];
+    Expect(controller.confirmationRuns == previousRuns + 1, "retry after failed quit presents a new confirmation");
+    BOOL privateNameLogged = NO;
+    for (NSString *event in controller.quitEvents)
+        if (event.length && [event containsString:workspace.fixtureApplication.localizedName]) privateNameLogged = YES;
+    Expect(!privateNameLogged, "public quit events do not include the confirmation's application name");
+}
+
 int main(void) {
     @autoreleasepool {
+        TestCloseConfirmationScope();
         Expect(NSApp == nil,"tests begin without NSApplication");
         YMFakeTopology *t; YMFakeDisplay *d; YMManagedDisplay *p,*s;
         YMFakeController *c = Controller(&t,&d,&p,&s);
