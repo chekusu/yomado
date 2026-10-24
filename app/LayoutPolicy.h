@@ -53,4 +53,44 @@ static inline NSNumber *YMPhysicalRightEdge(NSArray *snapshot) {
     return rightEdge;
 }
 
+// Active physical outputs to disconnect, sorted by display ID. Vendor, model
+// and serial travel with the ID so a reused ID never passes as the same
+// monitor. nil when one of them is mirrored or the snapshot is malformed.
+static inline NSArray<NSDictionary *> *YMPhysicalOutputTargets(NSArray *snapshot) {
+    if (![snapshot isKindOfClass:NSArray.class]) return nil;
+    NSMutableArray<NSDictionary *> *targets = [NSMutableArray array];
+    for (id value in snapshot) {
+        if (![value isKindOfClass:NSDictionary.class]) return nil;
+        NSDictionary *display = value;
+        NSArray *keys = @[@"displayID", @"isActive", @"isVirtual", @"isInMirrorSet",
+                          @"vendorID", @"modelNumber", @"serialNumber"];
+        for (NSString *key in keys)
+            if (![display[key] isKindOfClass:NSNumber.class]) return nil;
+        if (![display[@"isActive"] boolValue] || [display[@"isVirtual"] boolValue]) continue;
+        if ([display[@"isInMirrorSet"] boolValue]) return nil;
+        [targets addObject:@{@"displayID": display[@"displayID"], @"vendorID": display[@"vendorID"],
+                             @"modelNumber": display[@"modelNumber"], @"serialNumber": display[@"serialNumber"]}];
+    }
+    [targets sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        return [(NSNumber *)a[@"displayID"] compare:(NSNumber *)b[@"displayID"]];
+    }];
+    return targets;
+}
+
+typedef NS_ENUM(NSInteger, YMOutputRestoreStep) {
+    YMOutputRestoreWait,
+    YMOutputRestoreDone,
+    YMOutputRestoreGiveUp,
+};
+
+// Re-enabling is asynchronous: keep waiting while a connected target is still
+// dark. A target that went offline was probably unplugged and cannot come
+// back, but give a just-enabled output a few seconds to report online first.
+// Automatic retries stop after a minute; the user can retry by hand.
+static inline YMOutputRestoreStep YMOutputRestoreStepFor(NSUInteger darkConnected, NSUInteger offline,
+                                                         NSTimeInterval elapsed) {
+    if (!darkConnected && (!offline || elapsed >= 5)) return YMOutputRestoreDone;
+    return elapsed >= 60 ? YMOutputRestoreGiveUp : YMOutputRestoreWait;
+}
+
 #endif
