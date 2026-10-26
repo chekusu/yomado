@@ -83,6 +83,10 @@ typedef NS_ENUM(NSInteger, YMOutputRestoreStep) {
     YMOutputRestoreGiveUp,
 };
 
+static inline BOOL YMRestoreDeadlineReached(NSTimeInterval elapsed) {
+    return !isfinite(elapsed) || elapsed >= 60;
+}
+
 // Re-enabling is asynchronous: keep waiting while a connected target is still
 // dark. A target that went offline was probably unplugged and cannot come
 // back, but give a just-enabled output a few seconds to report online first.
@@ -90,7 +94,7 @@ typedef NS_ENUM(NSInteger, YMOutputRestoreStep) {
 static inline YMOutputRestoreStep YMOutputRestoreStepFor(NSUInteger darkConnected, NSUInteger offline,
                                                          NSTimeInterval elapsed) {
     if (!darkConnected && (!offline || elapsed >= 5)) return YMOutputRestoreDone;
-    return elapsed >= 60 ? YMOutputRestoreGiveUp : YMOutputRestoreWait;
+    return YMRestoreDeadlineReached(elapsed) ? YMOutputRestoreGiveUp : YMOutputRestoreWait;
 }
 
 #endif
