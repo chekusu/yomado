@@ -134,6 +134,9 @@ static void OutputFixtures(void) {
     Check(YMOutputRestoreStepFor(0, 1, 2) == YMOutputRestoreWait, @"an offline target gets a few seconds");
     Check(YMOutputRestoreStepFor(0, 1, 5) == YMOutputRestoreDone, @"an unplugged target does not block recovery");
     Check(YMOutputRestoreStepFor(1, 1, 10) == YMOutputRestoreWait, @"an unplugged target does not end the wait for another");
+    Check(!YMRestoreDeadlineReached(59.99), @"layout recovery remains retryable before the deadline");
+    Check(YMRestoreDeadlineReached(60), @"layout recovery stalls at the deadline");
+    Check(YMRestoreDeadlineReached(INFINITY), @"non-finite recovery elapsed time fails closed at the deadline");
 }
 
 int main(void) {

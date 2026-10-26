@@ -1615,11 +1615,11 @@ static os_log_t YMQuitLog(void) {
     self.preparing = NO;
     self.trialDeadline = 0;
     NSTimeInterval now = NSDate.date.timeIntervalSince1970;
-    if (self.armed && !self.restoreStarted) self.restoreStarted = now;
+    if ((self.armed || self.layoutChangedForTrial) && !self.restoreStarted) self.restoreStarted = now;
     NSTimeInterval elapsed = now - self.restoreStarted;
     NSString *failure = nil;
     if (self.armed && !ConfigureEnabled(self.targets, YES, &failure)) {
-        if (elapsed >= 60) { [self stallRestore]; return; }
+        if (YMRestoreDeadlineReached(elapsed)) { [self stallRestore]; return; }
         self.statusLabel.stringValue = @"实体屏恢复失败，虚拟屏继续保留";
         self.detailLabel.stringValue = failure ?: @"每秒重试恢复；独立恢复进程也已收到恢复信号。";
         self.restoring = NO;
@@ -1641,6 +1641,7 @@ static os_log_t YMQuitLog(void) {
         }
     }
     if (self.layoutChangedForTrial && ![self setVirtualMain:NO]) {
+        if (YMRestoreDeadlineReached(elapsed)) { [self stallRestore]; return; }
         self.statusLabel.stringValue = @"显示排列恢复失败，虚拟屏继续保留";
         self.detailLabel.stringValue = @"将继续尝试恢复本次试验前的排列。请检查实体屏连接。";
         self.restoring = NO;
