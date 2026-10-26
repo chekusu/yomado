@@ -155,6 +155,7 @@ static NSString *JSONText(id object) { return JSONTextWithIdentifiers(object, NO
 @property NSTextField *statusLabel;
 @property NSTextField *inventoryLabel;
 @property NSTextField *detailLabel;
+@property NSStackView *outputRecoveryStatusRow;
 @property YMStatusPill *statusPill;
 @property NSTextField *wechatStatusLabel;
 @property NSTextField *wechatPermissionGuide;
@@ -225,6 +226,7 @@ static NSString *JSONText(id object) { return JSONTextWithIdentifiers(object, NO
 - (void)buildWindow;
 - (void)preparePanelPresenter;
 - (void)updateInventory;
+- (void)updateOutputRecoveryPresentation;
 // Private test seam: production returns DisplaySnapshot(); tests override with fixtures.
 - (NSArray<NSDictionary *> *)controllerDisplaySnapshot;
 - (void)beginUpdater;
@@ -1258,9 +1260,23 @@ static os_log_t YMQuitLog(void) {
     [board setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
                                     forOrientation:NSLayoutConstraintOrientationVertical];
 
-    NSTextField *inputHint = Label(@"实体屏与虚拟屏仍共用键鼠与焦点；不会隔离 Agent 输入，也不会关闭实体显示器。", 11, NSFontWeightRegular);
+    NSTextField *inputHint = Label(@"实体屏与虚拟屏仍共用键鼠与焦点；不会隔离 Agent 输入。日常创建虚拟屏不会关闭实体显示器。", 11, NSFontWeightRegular);
     inputHint.textColor = NSColor.secondaryLabelColor;
     [stack addArrangedSubview:inputHint]; YMFillWidth(inputHint, stack);
+
+    // Recovery controls must remain understandable after automatic retries stop.
+    // Ordinary status messages stay out of the panel outside this explicit mode.
+    self.outputRecoveryStatusRow = YMStack(NSUserInterfaceLayoutOrientationVertical, 3);
+    self.outputRecoveryStatusRow.hidden = YES;
+    self.statusLabel = Label(@"", 12, NSFontWeightSemibold);
+    self.detailLabel = Label(@"", 11, NSFontWeightRegular);
+    self.detailLabel.textColor = NSColor.secondaryLabelColor;
+    [self.outputRecoveryStatusRow addArrangedSubview:self.statusLabel];
+    YMFillWidth(self.statusLabel, self.outputRecoveryStatusRow);
+    [self.outputRecoveryStatusRow addArrangedSubview:self.detailLabel];
+    YMFillWidth(self.detailLabel, self.outputRecoveryStatusRow);
+    [stack addArrangedSubview:self.outputRecoveryStatusRow];
+    YMFillWidth(self.outputRecoveryStatusRow, stack);
 
     self.savedProfilesView = [[YMSavedDisplayProfilesView alloc] initWithFrame:NSZeroRect];
     __weak ADController *weakSelf = self;
@@ -1345,9 +1361,6 @@ static os_log_t YMQuitLog(void) {
     [self.updateStatusRow addArrangedSubview:self.cancelUpdateButton];
     [stack addArrangedSubview:self.updateStatusRow]; YMFillWidth(self.updateStatusRow, stack);
 
-    // Status messages are retained for recovery diagnostics, not permanent UI.
-    self.statusLabel = Label(@"", 12, NSFontWeightRegular);
-    self.detailLabel = Label(@"", 11, NSFontWeightRegular);
     [self preparePanelPresenter];
 }
 - (void)displayParametersChanged:(NSNotification *)notification {
@@ -1643,7 +1656,19 @@ static os_log_t YMQuitLog(void) {
             self.statusLabel.stringValue = @"";
             self.detailLabel.stringValue = @"界面示例 · 应用图标为示意；不会读取本机窗口。";
         }
+        [self updateOutputRecoveryPresentation];
     } @finally { self.updatingInventory = NO; }
+}
+- (void)updateOutputRecoveryPresentation {
+    BOOL recovering = self.restoring || self.recoveryRequested;
+    BOOL active = self.preparing || self.armed || recovering || self.layoutChangedForTrial || self.restoreStalled;
+    self.outputRecoveryStatusRow.hidden = !active;
+    if (!active) return;
+    self.statusPill.text = self.restoreStalled ? @"实体屏待恢复"
+        : recovering ? @"恢复实体屏…"
+        : self.preparing ? @"准备关闭实体屏…"
+        : self.armed ? @"实体屏已关闭" : @"显示排列待恢复";
+    self.statusPill.tint = self.restoreStalled ? NSColor.systemRedColor : NSColor.systemOrangeColor;
 }
 - (void)powerAssertions:(BOOL)on {
     if (self.previewMode) return;
@@ -2066,7 +2091,8 @@ static os_log_t YMQuitLog(void) {
     [self writeStateEnding:NO];
     self.preparing = NO;
     self.trialDeadline = 0;
-    NSTimeInterval now = NSDate.date.timeIntervalSince1970;
+    [self updateOutputRecoveryPresentation];
+    NSTimeInterval now = [self outputRestoreClock];
     if ((self.armed || self.layoutChangedForTrial) && !self.restoreStarted) self.restoreStarted = now;
     NSTimeInterval elapsed = now - self.restoreStarted;
     NSString *failure = nil;
@@ -2112,6 +2138,10 @@ static os_log_t YMQuitLog(void) {
     [self updateInventory];
     [self showWindow:nil];
 }
+// The retry window must not grow when wall-clock time is adjusted.
+- (NSTimeInterval)outputRestoreClock {
+    return NSProcessInfo.processInfo.systemUptime;
+}
 // Stop the automatic retries; the hotkey and menu item stay available.
 - (void)stallRestore {
     self.restoreStalled = YES;
@@ -2119,6 +2149,7 @@ static os_log_t YMQuitLog(void) {
     self.statusLabel.stringValue = @"实体屏恢复未完成";
     self.detailLabel.stringValue = @"已自动重试 1 分钟。请检查显示器连接，然后按 ⌃⌥⌘R 或在菜单栏选「恢复实体显示器」重试。";
     self.restoring = NO;
+    [self updateOutputRecoveryPresentation];
     [self showWindow:nil];
 }
 // The hotkey and menu item start a fresh retry window.
@@ -2139,7 +2170,7 @@ static os_log_t YMQuitLog(void) {
         self.appOperationInProgress = NO;
     }
     [self updateInventory];
-    if (![self writeStateEnding:NO] && self.armed) { [self restore:nil]; return; }
+    if (![self writeStateEnding:NO] && self.armed && !self.restoreStalled) { [self restore:nil]; return; }
     NSString *restoredPath = [self.statePath stringByAppendingString:@".restored"];
     if ([NSFileManager.defaultManager fileExistsAtPath:restoredPath]) {
         [NSFileManager.defaultManager removeItemAtPath:restoredPath error:nil];

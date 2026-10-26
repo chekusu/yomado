@@ -155,6 +155,36 @@
 }
 @end
 
+// Drive production restore/tick transitions without touching output APIs. The
+// layout-only path stays unarmed, so ConfigureEnabled is never invoked.
+@interface YMOutputRestoreController : YMFakeController
+@property NSTimeInterval restoreClock;
+@property BOOL layoutRestoreSucceeds;
+@property NSUInteger layoutRestoreCalls;
+@property NSUInteger finishWatchdogCalls;
+@end
+@implementation YMOutputRestoreController
+- (NSTimeInterval)outputRestoreClock { return self.restoreClock; }
+- (BOOL)setVirtualMain:(BOOL)virtualMain {
+    (void)virtualMain;
+    self.layoutRestoreCalls++;
+    return self.layoutRestoreSucceeds;
+}
+- (void)finishWatchdog { self.finishWatchdogCalls++; }
+@end
+
+// An armed tick must request restoration on a failed state write, but must
+// respect a previous deadline stop. Count the request rather than executing
+// restore, which would otherwise re-enable real physical outputs.
+@interface YMOutputRestoreTickController : YMFakeController
+@property NSUInteger outputRestoreCalls;
+@property NSUInteger failedStateWrites;
+@end
+@implementation YMOutputRestoreTickController
+- (BOOL)writeStateEnding:(BOOL)end { (void)end; self.failedStateWrites++; return NO; }
+- (void)restore:(id)sender { (void)sender; self.outputRestoreCalls++; }
+@end
+
 @interface YMUnmovableWorkspace : NSObject
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSArray<NSDictionary *> *> *windowsByDisplayID;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *pendingReadsByDisplayID;
@@ -720,6 +750,71 @@ static YMFakeController *Controller(YMFakeTopology **t, YMFakeDisplay **d, YMMan
 int main(void) {
     @autoreleasepool {
         Expect(NSApp == nil,"tests begin without NSApplication");
+
+        {
+            YMOutputRestoreController *controller = [YMOutputRestoreController new];
+            controller.statePath = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+            controller.layoutChangedForTrial = YES;
+            controller.preparing = YES;
+            controller.restoreClock = 100;
+            [controller restore:nil];
+            Expect(!controller.armed && controller.restoreStarted == 100,
+                   "layout-only recovery starts its deadline from the injected monotonic clock");
+            Expect(controller.layoutRestoreCalls == 1 && controller.recoveryRequested
+                   && !controller.restoreStalled && !controller.restoring && !controller.preparing,
+                   "a failed initial layout restore stays retryable without enabling outputs");
+
+            controller.restoreClock = 159.999;
+            [controller tick:nil];
+            Expect(controller.layoutRestoreCalls == 2 && controller.restoreStarted == 100
+                   && controller.recoveryRequested && !controller.restoreStalled,
+                   "pre-deadline ticks retry without extending the original restore window");
+            controller.restoreClock = 160;
+            [controller tick:nil];
+            Expect(controller.layoutRestoreCalls == 3 && controller.restoreStalled
+                   && !controller.recoveryRequested && !controller.restoring
+                   && controller.layoutChangedForTrial,
+                   "the deadline stops failed layout restoration while retaining the workspace");
+            [controller tick:nil];
+            [controller tick:nil];
+            Expect(controller.layoutRestoreCalls == 3 && controller.restoreStalled,
+                   "ticks after a layout deadline do not resume automatic restoration");
+
+            controller.restoreClock = 1000;
+            [controller restoreManually:nil];
+            Expect(controller.layoutRestoreCalls == 4 && controller.restoreStarted == 1000
+                   && controller.recoveryRequested && !controller.restoreStalled,
+                   "manual restore starts a fresh retry window after a deadline stop");
+            controller.restoreClock = 1059;
+            [controller tick:nil];
+            Expect(controller.layoutRestoreCalls == 5 && controller.recoveryRequested
+                   && !controller.restoreStalled && controller.restoreStarted == 1000,
+                   "manual recovery retries against its own new deadline");
+            controller.layoutRestoreSucceeds = YES;
+            [controller tick:nil];
+            Expect(controller.layoutRestoreCalls == 6 && !controller.layoutChangedForTrial
+                   && !controller.armed && !controller.recoveryRequested && !controller.restoreStalled
+                   && !controller.restoring && controller.restoreStarted == 0
+                   && controller.finishWatchdogCalls == 1,
+                   "successful layout recovery clears retry state and finishes watchdog ownership");
+        }
+
+        {
+            YMOutputRestoreTickController *controller = [YMOutputRestoreTickController new];
+            controller.statePath = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+            controller.armed = YES;
+            controller.restoreStalled = YES;
+            [controller tick:nil];
+            [controller tick:nil];
+            Expect(controller.failedStateWrites == 2 && controller.outputRestoreCalls == 0
+                   && controller.restoreStalled,
+                   "a persistent state-write failure cannot bypass an armed restore deadline stop");
+            controller.restoreStalled = NO;
+            [controller tick:nil];
+            Expect(controller.failedStateWrites == 3 && controller.outputRestoreCalls == 1,
+                   "an armed state-write failure still requests recovery before the deadline stop");
+        }
+
         YMFakeTopology *t; YMFakeDisplay *d; YMManagedDisplay *p,*s;
         YMFakeController *c = Controller(&t,&d,&p,&s);
         __weak YMFakeController *weakC=c; __weak YMManagedDisplay *weakP=p;
