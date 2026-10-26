@@ -172,4 +172,204 @@ static inline BOOL YMWorkspacePhysicalReturnConfirmed(NSDictionary *cgFrame, NSD
     return cgDisplay && axDisplay && ![cgDisplay[@"isVirtual"] boolValue] && ![axDisplay[@"isVirtual"] boolValue] &&
         [cgDisplay[@"displayID"] isEqual:axDisplay[@"displayID"]];
 }
+// Exact five-field identity: valid integers/string, then full equality. No geometry join.
+static inline BOOL YMWorkspaceIdentityInteger(id value, uint64_t minimum, uint64_t maximum) {
+    if (![value isKindOfClass:NSNumber.class]) return NO;
+    double number = [value doubleValue];
+    return isfinite(number) && number >= minimum && number <= maximum && floor(number) == number;
+}
+static inline BOOL YMWorkspaceIdentityValid(NSDictionary *identity) {
+    return [identity isKindOfClass:NSDictionary.class] && identity.count == 5 &&
+        YMWorkspaceIdentityInteger(identity[@"pid"], 1, INT_MAX) &&
+        YMWorkspaceIdentityInteger(identity[@"windowID"], 1, UINT32_MAX) &&
+        YMWorkspaceIdentityInteger(identity[@"startSeconds"], 1, UINT64_C(9999999999)) &&
+        YMWorkspaceIdentityInteger(identity[@"startMicroseconds"], 0, 999999) &&
+        [identity[@"bundleID"] isKindOfClass:NSString.class] && [identity[@"bundleID"] length] > 0 &&
+        [identity[@"bundleID"] length] <= 255;
+}
+static inline BOOL YMWorkspaceSameWindowIdentity(NSDictionary *a, NSDictionary *b) {
+    return YMWorkspaceIdentityValid(a) && YMWorkspaceIdentityValid(b) && [a isEqual:b];
+}
+static inline BOOL YMWorkspaceCGCandidateIdentity(NSDictionary *cg) {
+    return [cg isKindOfClass:NSDictionary.class] &&
+        YMWorkspaceIdentityInteger(cg[@"pid"], 1, INT_MAX) &&
+        YMWorkspaceIdentityInteger(cg[@"windowID"], 1, UINT32_MAX);
+}
+// True only for surfaces that are classifiable and clearly not candidates.
+static inline BOOL YMWorkspaceCGCandidateClearlyInvisible(NSDictionary *cg) {
+    if (!YMWorkspaceCGCandidateIdentity(cg) || !YMWorkspaceGeometry(cg[@"frame"])) return NO;
+    if (![cg[@"layer"] isKindOfClass:NSNumber.class] ||
+        ![cg[@"onScreen"] isKindOfClass:NSNumber.class] ||
+        ![cg[@"alpha"] isKindOfClass:NSNumber.class] ||
+        !isfinite([cg[@"alpha"] doubleValue])) return NO;
+    return [cg[@"layer"] integerValue] != 0 || ![cg[@"onScreen"] boolValue] ||
+        [cg[@"alpha"] doubleValue] <= 0;
+}
+static inline BOOL YMWorkspaceCGCandidateVisible(NSDictionary *cg) {
+    if (!YMWorkspaceCGCandidateIdentity(cg) || !YMWorkspaceGeometry(cg[@"frame"])) return NO;
+    return [cg[@"layer"] isKindOfClass:NSNumber.class] && [cg[@"layer"] integerValue] == 0 &&
+        [cg[@"onScreen"] isKindOfClass:NSNumber.class] && [cg[@"onScreen"] boolValue] &&
+        [cg[@"alpha"] isKindOfClass:NSNumber.class] && isfinite([cg[@"alpha"] doubleValue]) &&
+        [cg[@"alpha"] doubleValue] > 0;
+}
+static inline BOOL YMWorkspaceAXStateNumber(id value) {
+    return [value isKindOfClass:NSNumber.class];
+}
+static inline BOOL YMWorkspaceCGMeetsOldSize(NSDictionary *frame) {
+    return YMWorkspaceGeometry(frame) &&
+        [frame[@"width"] doubleValue] >= 80 && [frame[@"height"] doubleValue] >= 64;
+}
+static inline NSString *YMWorkspaceWindowKey(id pid, id windowID) {
+    return [NSString stringWithFormat:@"%@:%@", pid, windowID];
+}
+static inline NSDictionary *YMWorkspaceBlocker(id pid, id windowID, NSString *reason,
+                                               NSDictionary *display) {
+    NSMutableDictionary *blocker = [@{@"pid": pid, @"windowID": windowID, @"reason": reason} mutableCopy];
+    if (display) {
+        blocker[@"displayID"] = display[@"displayID"];
+        blocker[@"isVirtual"] = display[@"isVirtual"];
+    }
+    return blocker;
+}
+// Associate CG visibility with AX identity, then size and own by real AX geometry.
+static inline NSDictionary *YMWorkspaceNormalizeWindowSnapshot(
+    NSArray<NSDictionary *> *cgWindows, NSArray<NSDictionary *> *axWindows,
+    BOOL enumerationComplete, NSArray<NSDictionary *> *displays) {
+    if (!enumerationComplete || ![cgWindows isKindOfClass:NSArray.class] ||
+        ![axWindows isKindOfClass:NSArray.class] || ![displays isKindOfClass:NSArray.class])
+        return @{@"windows": @[], @"blockers": @[], @"complete": @NO};
+
+    NSMutableDictionary *cgByKey = [NSMutableDictionary dictionary];
+    NSMutableDictionary *axByKey = [NSMutableDictionary dictionary];
+    NSMutableSet *duplicateKeys = [NSMutableSet set];
+    NSMutableDictionary *pidByWindowID = [NSMutableDictionary dictionary];
+    NSMutableSet *crossPIDWindowIDs = [NSMutableSet set];
+    NSMutableArray *blockers = [NSMutableArray array];
+    NSMutableArray *windows = [NSMutableArray array];
+    BOOL complete = YES;
+
+    for (NSDictionary *cg in cgWindows) {
+        if (![cg isKindOfClass:NSDictionary.class]) { complete = NO; continue; }
+        if (!YMWorkspaceCGCandidateIdentity(cg)) { complete = NO; continue; }
+        if (YMWorkspaceCGCandidateClearlyInvisible(cg)) continue;
+        if (!YMWorkspaceCGCandidateVisible(cg)) {
+            [blockers addObject:YMWorkspaceBlocker(cg[@"pid"], cg[@"windowID"], @"invalidCG", nil)];
+            continue;
+        }
+        NSString *key = YMWorkspaceWindowKey(cg[@"pid"], cg[@"windowID"]);
+        if (cgByKey[key]) [duplicateKeys addObject:key];
+        else cgByKey[key] = cg;
+        NSNumber *prior = pidByWindowID[cg[@"windowID"]];
+        if (prior && ![prior isEqual:cg[@"pid"]]) [crossPIDWindowIDs addObject:cg[@"windowID"]];
+        else pidByWindowID[cg[@"windowID"]] = cg[@"pid"];
+    }
+    for (NSDictionary *ax in axWindows) {
+        if (![ax isKindOfClass:NSDictionary.class]) continue;
+        NSDictionary *identity = ax[@"identity"];
+        if (![identity isKindOfClass:NSDictionary.class] ||
+            !YMWorkspaceIdentityInteger(identity[@"pid"], 1, INT_MAX) ||
+            !YMWorkspaceIdentityInteger(identity[@"windowID"], 1, UINT32_MAX)) continue;
+        NSString *key = YMWorkspaceWindowKey(identity[@"pid"], identity[@"windowID"]);
+        if (axByKey[key]) [duplicateKeys addObject:key];
+        else axByKey[key] = ax;
+        NSNumber *prior = pidByWindowID[identity[@"windowID"]];
+        if (prior && ![prior isEqual:identity[@"pid"]]) [crossPIDWindowIDs addObject:identity[@"windowID"]];
+        else pidByWindowID[identity[@"windowID"]] = identity[@"pid"];
+    }
+
+    if (duplicateKeys.count || crossPIDWindowIDs.count) {
+        for (NSString *key in duplicateKeys) {
+            NSDictionary *cg = cgByKey[key];
+            NSDictionary *ax = axByKey[key];
+            id pid = cg[@"pid"] ?: ax[@"identity"][@"pid"];
+            id windowID = cg[@"windowID"] ?: ax[@"identity"][@"windowID"];
+            if (pid && windowID)
+                [blockers addObject:YMWorkspaceBlocker(pid, windowID, @"duplicate", nil)];
+        }
+        for (NSNumber *windowID in crossPIDWindowIDs)
+            [blockers addObject:YMWorkspaceBlocker(@0, windowID, @"crossPID", nil)];
+        return @{@"windows": @[], @"blockers": blockers, @"complete": @YES};
+    }
+
+    for (NSString *key in cgByKey) {
+        NSDictionary *cg = cgByKey[key];
+        NSDictionary *ax = axByKey[key];
+        if (!ax) {
+            [blockers addObject:YMWorkspaceBlocker(cg[@"pid"], cg[@"windowID"], @"unmatched", nil)];
+            complete = NO;
+            continue;
+        }
+        NSDictionary *identity = ax[@"identity"];
+        if (!YMWorkspaceIdentityValid(identity) ||
+            ![identity[@"pid"] isEqual:cg[@"pid"]] || ![identity[@"windowID"] isEqual:cg[@"windowID"]]) {
+            [blockers addObject:YMWorkspaceBlocker(cg[@"pid"], cg[@"windowID"], @"invalidIdentity", nil)];
+            continue;
+        }
+        if (![ax[@"readable"] isKindOfClass:NSNumber.class] || ![ax[@"readable"] boolValue]) {
+            [blockers addObject:YMWorkspaceBlocker(cg[@"pid"], cg[@"windowID"], @"unreadable", nil)];
+            continue;
+        }
+        if (!YMWorkspaceAXStateNumber(ax[@"ordinary"]) || !YMWorkspaceAXStateNumber(ax[@"minimized"])) {
+            [blockers addObject:YMWorkspaceBlocker(cg[@"pid"], cg[@"windowID"], @"unknownState", nil)];
+            continue;
+        }
+        NSDictionary *axFrame = YMWorkspaceGeometry(ax[@"frame"]);
+        NSDictionary *display = axFrame ? YMWorkspaceDisplayForFrame(axFrame, displays) : nil;
+        BOOL ordinary = [ax[@"ordinary"] boolValue];
+        BOOL minimized = [ax[@"minimized"] boolValue];
+        if (!ordinary || minimized) {
+            if (!axFrame) {
+                [blockers addObject:YMWorkspaceBlocker(cg[@"pid"], cg[@"windowID"],
+                    minimized ? @"minimized" : @"nonOrdinary", nil)];
+            } else if (YMWorkspaceCGMeetsOldSize(axFrame)) {
+                NSMutableDictionary *blocker = [YMWorkspaceBlocker(cg[@"pid"], cg[@"windowID"],
+                    minimized ? @"minimized" : @"nonOrdinary", display) mutableCopy];
+                blocker[@"identity"] = identity;
+                blocker[@"frame"] = axFrame;
+                [blockers addObject:blocker];
+            }
+            // Exact classified small non-ordinary/minimized: omit without blocker.
+            // Manager privately re-classifies current CG/AX to confirm exclusion.
+            continue;
+        }
+        if (!axFrame) {
+            [blockers addObject:YMWorkspaceBlocker(cg[@"pid"], cg[@"windowID"], @"invalidFrame", nil)];
+            continue;
+        }
+        if (!YMWorkspaceCGMeetsOldSize(axFrame)) {
+            // Exact classified undersized ordinary: omit without blocker.
+            continue;
+        }
+        if (!display) {
+            [blockers addObject:YMWorkspaceBlocker(cg[@"pid"], cg[@"windowID"], @"unowned", nil)];
+            continue;
+        }
+        NSMutableDictionary *entry = [@{
+            @"pid": cg[@"pid"], @"windowID": cg[@"windowID"], @"identity": identity,
+            @"frame": axFrame, @"cgFrame": cg[@"frame"],
+            @"displayID": display[@"displayID"], @"isVirtual": display[@"isVirtual"],
+            @"positionSettableKnown": @(YMWorkspaceAXStateNumber(ax[@"positionSettable"])),
+            @"positionSettable": [ax[@"positionSettable"] isKindOfClass:NSNumber.class] ?
+                ax[@"positionSettable"] : @NO
+        } mutableCopy];
+        if (ax[@"element"]) entry[@"element"] = ax[@"element"];
+        [windows addObject:entry];
+    }
+
+    return @{@"windows": windows, @"blockers": blockers, @"complete": @(complete)};
+}
+// Source eligibility for a normalized snapshot; unknown blockers close every source.
+static inline BOOL YMWorkspaceSnapshotAllowsSource(NSDictionary *snapshot,
+                                                   NSNumber *sourceFilter) {
+    if (![snapshot isKindOfClass:NSDictionary.class] ||
+        ![snapshot[@"complete"] isKindOfClass:NSNumber.class] || ![snapshot[@"complete"] boolValue] ||
+        ![snapshot[@"blockers"] isKindOfClass:NSArray.class]) return NO;
+    for (NSDictionary *blocker in snapshot[@"blockers"]) {
+        if (![blocker isKindOfClass:NSDictionary.class]) return NO;
+        if (![blocker[@"displayID"] isKindOfClass:NSNumber.class] ||
+            ![blocker[@"isVirtual"] isKindOfClass:NSNumber.class]) return NO;
+        if (YMWorkspaceMatchesSource(blocker, sourceFilter)) return NO;
+    }
+    return YES;
+}
 #endif

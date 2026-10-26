@@ -31,6 +31,9 @@ ym_sdk="$(DEVELOPER_DIR="$ym_developer" /usr/bin/xcrun --sdk macosx --show-sdk-p
   -framework CoreGraphics -o "$ym_stage/AppWorkspaceTests"
 "$ym_stage/AppWorkspaceTests"
 
+# Injected workspace window-access adapter; never probes live apps or displays.
+bash "$ym_root/scripts/test-app-workspace.sh"
+
 "$ym_clang" -fobjc-arc -Wall -Wextra -Werror -isysroot "$ym_sdk" -mmacosx-version-min=14.0 \
   -ffile-prefix-map="$ym_root"=. -fmacro-prefix-map="$ym_root"=. \
   -I "$ym_root/app" "$ym_root/tests/InputLeaseTests.m" -framework Foundation \

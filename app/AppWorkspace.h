@@ -3,6 +3,7 @@
 
 #import <AppKit/AppKit.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import "AppWorkspaceAccess.h"
 
 NS_ASSUME_NONNULL_BEGIN
 FOUNDATION_EXPORT NSString * const YMAppWorkspaceErrorDomain;
@@ -14,9 +15,14 @@ FOUNDATION_EXPORT NSString * const YMAppWorkspaceErrorDomain;
 // yomado must call restoreAll: before removing its displays. Never instantiate
 // this manager in the synthetic UI preview path.
 @interface YMAppWorkspace : NSObject
+- (instancetype)initWithWindowAccess:(id<YMWorkspaceWindowAccess>)access;
 @property(nonatomic, copy, readonly) NSArray<NSDictionary *> *rows;
 @property(nonatomic, copy, readonly) NSString *statusText;
 @property(nonatomic, readonly) BOOL accessibilityTrusted;
+@property(nonatomic, copy, nullable) void (^inventoryDidChange)(void);
+// Complete published observation matching current topology/permission algebra.
+// Pending, failed, or expired inventory is never ready for close/export gates.
+@property(nonatomic, readonly) BOOL inventoryReady;
 @property(nonatomic, readonly) BOOL needsRestoreBeforeRemovingVirtualDisplay;
 - (void)refreshWithVirtualDisplayIDs:(NSArray<NSNumber *> *)displayIDs
                    displaySnapshot:(NSArray<NSDictionary *> *)snapshot;
@@ -44,13 +50,16 @@ FOUNDATION_EXPORT NSString * const YMAppWorkspaceErrorDomain;
 - (BOOL)restoreDisplayID:(CGDirectDisplayID)displayID error:(NSError * _Nullable * _Nullable)error;
 - (BOOL)restoreAll:(NSError * _Nullable * _Nullable)error;
 - (BOOL)needsRestoreForDisplayID:(CGDirectDisplayID)displayID;
+- (BOOL)inventoryReadyForClosingDisplayID:(CGDirectDisplayID)displayID;
 // Before closing a display: per-app counts ({appName, count}) of visible
 // windows that cannot be matched to a movable ordinary window, such as
-// dialogs, splash screens and tool windows. Read-only; never moves a window.
-- (NSArray<NSDictionary *> *)unmovableWindowsForDisplayID:(CGDirectDisplayID)displayID;
+// dialogs, splash screens and tool windows. nil means evidence is pending or
+// unreliable, not an empty display. Read-only; never moves a window.
+- (nullable NSArray<NSDictionary *> *)unmovableWindowsForDisplayID:(CGDirectDisplayID)displayID;
 // After the user agrees, restoring this display returns the matched windows
-// and leaves the rest for macOS to relocate when the display is removed.
+// and leaves only the exact windows just offered for confirmation to macOS.
 - (void)allowUnmovableWindowsOnDisplayID:(CGDirectDisplayID)displayID;
+- (void)cancelUnmovableWindowAllowances;
 // Update-only handoff. These methods preserve existing physical origins for
 // exact extant windows, never application-level matching or content state.
 - (nullable NSArray<NSDictionary *> *)restartOriginCheckpointsWithError:(NSError * _Nullable * _Nullable)error;

@@ -4,6 +4,9 @@
 NS_ASSUME_NONNULL_BEGIN
 
 FOUNDATION_EXPORT NSErrorDomain const YMDisplayTopologyErrorDomain;
+/// Privacy-safe context on mode-setting failures: display role, CGError and
+/// scalar mode properties only. No device identifiers or retained mode tokens.
+FOUNDATION_EXPORT NSString *const YMDisplayTopologyDiagnosticsKey;
 
 /// In-memory only. Display identities and retained CoreGraphics mode objects are
 /// never persisted. Removing a member is useful when an owned screen is closed.

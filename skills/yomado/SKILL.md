@@ -20,7 +20,7 @@ Let the agent prepare its own work screen; the user does not need to create it m
 
 1. Open yomado's control panel from its menu-bar item or by opening the installed app. Opening an existing instance brings back its panel; do not quit or restart it to find the panel.
 2. Inspect the live UI. In v0.3.3, the menu-bar accessibility label is `yomado · 夜窗` and its panel item is `打开控制面板`. Labels may change in later versions; use current observations, not fixed coordinates.
-3. If no suitable task-owned screen exists, use the header **+**, then `新增虚拟屏`. To start a saved screen, inspect that screen's submenu in the same menu. Use the screen's **…** menu → `重命名…`, enter a name such as `Codex · Blender`, then `保存`.
+3. If the live panel has `＋ 新建屏幕`, open it, enter a task-owned name such as `Codex · Blender`, choose resolution and HiDPI, then select `创建并启动`. For a saved task-owned screen, use `启动` in the `未启动的虚拟屏` section; use `编辑` to change its stopped configuration without starting it. Running screens can be renamed from `…` → `重命名…`. Older releases may still use the header `+` menu and saved-screen submenus: follow the controls actually observed, never fixed coordinates or assumed labels.
 4. Record the new screen's actual ID/bounds/scale. A renamed running screen can retain its old name in macOS until restarted; do not restart merely to synchronize the name.
 5. Compare the display arrangement and main display with the checkpoint before moving apps. Adding or removing displays can rearrange the desktop in released versions. If an existing screen moved, stop and report the discrepancy; do not continue moving user windows or silently change the main display. Resolve layout only within the user's authority.
 

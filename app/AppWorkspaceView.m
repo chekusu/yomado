@@ -57,6 +57,26 @@ static NSTextField *YMWorkspaceLabel(NSString *text, CGFloat size, NSFontWeight 
     return label;
 }
 
+static NSColor *YMWorkspaceSRGB(unsigned int value) {
+    return [NSColor colorWithSRGBRed:((value>>16)&255)/255.0
+        green:((value>>8)&255)/255.0 blue:(value&255)/255.0 alpha:1];
+}
+
+static void YMWorkspaceScreenPalette(BOOL dark, BOOL physical, BOOL highlighted,
+    NSColor **start, NSColor **end, NSColor **border, NSColor **detail) {
+    *start = YMWorkspaceSRGB(dark ? (physical ? 0x36383D : 0x263C55)
+                                  : (physical ? 0xF0F1F3 : 0xEAF2FF));
+    *end = YMWorkspaceSRGB(dark ? (physical ? 0x2E3035 : 0x1E3149)
+                                : (physical ? 0xE3E6EB : 0xD7E7FC));
+    *border = YMWorkspaceSRGB(dark ? (physical ? 0x77818F : 0x657E9E)
+                                   : (physical ? 0x858E9B : 0x7088A8));
+    *detail = [NSColor.labelColor colorWithAlphaComponent:dark ? 0.65 : 0.60];
+    if (highlighted) {
+        *start = [*start blendedColorWithFraction:0.08 ofColor:NSColor.controlAccentColor];
+        *end = [*end blendedColorWithFraction:0.12 ofColor:NSColor.controlAccentColor];
+        *border = [NSColor.controlAccentColor colorWithAlphaComponent:0.90];
+    }
+}
 
 @interface YMWorkspaceScreenView : NSView
 @property(nonatomic) BOOL physical;
@@ -74,19 +94,21 @@ static NSTextField *YMWorkspaceLabel(NSString *text, CGFloat size, NSFontWeight 
     (void)dirtyRect;
     NSRect rect=NSInsetRect(self.bounds,0.75,0.75);
     CGFloat width=rect.size.width;
-    NSColor *accent=self.highlighted ? NSColor.controlAccentColor : NSColor.secondaryLabelColor;
+    BOOL dark = [[self.effectiveAppearance bestMatchFromAppearancesWithNames:
+        @[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]] isEqualToString:NSAppearanceNameDarkAqua];
+    NSColor *top, *bottom, *borderColor, *detailColor;
+    YMWorkspaceScreenPalette(dark, self.physical, self.highlighted,
+        &top, &bottom, &borderColor, &detailColor);
     NSBezierPath *shape=[NSBezierPath bezierPathWithRoundedRect:rect xRadius:7 yRadius:7];
-    NSColor *top=[NSColor.controlBackgroundColor blendedColorWithFraction:self.highlighted ? 0.13 : 0.045 ofColor:NSColor.systemBlueColor];
-    NSColor *bottom=[NSColor.controlBackgroundColor blendedColorWithFraction:self.highlighted ? 0.20 : 0.10 ofColor:NSColor.systemBlueColor];
     [[[NSGradient alloc] initWithStartingColor:top endingColor:bottom] drawInBezierPath:shape angle:90];
-    [[accent colorWithAlphaComponent:self.highlighted ? 0.9 : 0.38] setStroke];
+    [borderColor setStroke];
     shape.lineWidth=self.highlighted ? 1.5 : 1;
     [shape stroke];
     NSMutableParagraphStyle *nameStyle=[NSMutableParagraphStyle new]; nameStyle.alignment=NSTextAlignmentCenter; nameStyle.lineBreakMode=NSLineBreakByTruncatingTail;
     [self.name drawInRect:NSMakeRect(NSMinX(rect)+9,7,width-18,15) withAttributes:@{NSFontAttributeName:[NSFont systemFontOfSize:10 weight:NSFontWeightMedium],NSForegroundColorAttributeName:NSColor.labelColor,NSParagraphStyleAttributeName:nameStyle}];
     if (self.detail.length) {
         NSMutableParagraphStyle *style=[NSMutableParagraphStyle new]; style.alignment=NSTextAlignmentCenter; style.lineBreakMode=NSLineBreakByTruncatingTail;
-        [self.detail drawInRect:NSMakeRect(NSMinX(rect)+8,22,width-16,13) withAttributes:@{NSFontAttributeName:[NSFont systemFontOfSize:8.5], NSForegroundColorAttributeName:NSColor.secondaryLabelColor,NSParagraphStyleAttributeName:style}];
+        [self.detail drawInRect:NSMakeRect(NSMinX(rect)+8,22,width-16,13) withAttributes:@{NSFontAttributeName:[NSFont systemFontOfSize:8.5], NSForegroundColorAttributeName:detailColor,NSParagraphStyleAttributeName:style}];
     }
 }
 @end
