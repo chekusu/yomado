@@ -99,6 +99,7 @@ static NSScreen *YMLeasePrimaryScreen(void) {
 }
 
 - (void)handleRequest:(NSDictionary *)info requestID:(NSString *)requestID {
+    [self expireElapsedState];
     if (self.activeLeaseID || self.prompt) {
         [self respond:requestID status:@"busy" extra:@{@"message":@"另一个 Agent 正在使用或申请鼠标键盘。"}];
         return;
@@ -111,6 +112,7 @@ static NSScreen *YMLeasePrimaryScreen(void) {
 }
 
 - (void)handleRelease:(NSDictionary *)info requestID:(NSString *)requestID {
+    [self expireElapsedState];
     NSString *leaseID = YMLeaseIdentifier(info[@"leaseID"]);
     if (leaseID && [leaseID isEqualToString:self.activeLeaseID]) {
         [self endActiveLeaseWithReason:@"released"];
@@ -123,6 +125,7 @@ static NSScreen *YMLeasePrimaryScreen(void) {
 }
 
 - (void)handleStatus:(NSDictionary *)info requestID:(NSString *)requestID {
+    [self expireElapsedState];
     NSString *leaseID = YMLeaseIdentifier(info[@"leaseID"]);
     if (!leaseID) {
         [self respond:requestID status:(self.activeLeaseID || self.prompt) ? @"busy" : @"idle" extra:@{}];
@@ -137,6 +140,16 @@ static NSScreen *YMLeasePrimaryScreen(void) {
 }
 
 #pragma mark - Prompt
+
+- (void)expireElapsedState {
+    NSDate *now = [NSDate date];
+    if (self.activeLeaseID && YMInputLeaseDeadlineExpired(self.expiry, now)) {
+        [self endActiveLeaseWithReason:@"expired"];
+    }
+    if (self.promptRequestID && YMInputLeaseDeadlineExpired(self.promptDeadline, now)) {
+        [self finishPromptGranted:NO status:@"timeout"];
+    }
+}
 
 - (void)showPromptForRequest:(NSString *)requestID agent:(NSString *)agent reason:(NSString *)reason
                      seconds:(NSTimeInterval)seconds {
@@ -229,6 +242,10 @@ static NSScreen *YMLeasePrimaryScreen(void) {
 - (void)finishPromptGranted:(BOOL)granted status:(NSString *)status {
     NSString *requestID = self.promptRequestID;
     if (!requestID) return;
+    if (YMInputLeaseDeadlineExpired(self.promptDeadline, [NSDate date])) {
+        granted = NO;
+        status = @"timeout";
+    }
     [self.promptTimer invalidate];
     self.promptTimer = nil;
     [self.prompt orderOut:nil];
