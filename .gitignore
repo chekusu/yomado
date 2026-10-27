@@ -18,3 +18,6 @@
 .env.*
 !.env.example
 *.log
+
+# Local development handoff data.
+/.sandbank/
