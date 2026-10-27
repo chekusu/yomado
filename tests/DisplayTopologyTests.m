@@ -10,7 +10,7 @@ static void Check(BOOL condition, NSString *message) {
 static NSDictionary *Mode(NSUInteger width, NSUInteger height, BOOL hiDPI, NSInteger ident) {
     NSDictionary *values = @{@"modeWidth":@(width), @"modeHeight":@(height),
         @"pixelWidth":@(width * (hiDPI ? 2 : 1)), @"pixelHeight":@(height * (hiDPI ? 2 : 1)),
-        @"refreshRate":@60, @"modeID":@(ident), @"modeFlags":@0};
+        @"refreshRate":@60, @"modeID":@(ident), @"modeFlags":@0, @"modeUsableForDesktopGUI":@YES};
     NSMutableDictionary *result = [values mutableCopy]; result[@"modeToken"] = values;
     return result;
 }
@@ -38,6 +38,13 @@ static NSMutableDictionary *Screen(NSInteger ident, NSInteger x, NSInteger y, BO
 @property BOOL foreignAfterCommit;
 @property BOOL generationDuringStage;
 @property BOOL foreignEditDuringStage;
+@property BOOL rejectInactiveFollowerMode;
+@property BOOL modeIDEditDuringStage;
+@property BOOL modeIDsAfterCommit;
+@property BOOL modeIDEveryRead;
+@property NSUInteger modeIDChurnReadsAfterCommit;
+@property NSError *modeError;
+@property NSUInteger modeIDEditAtRead;
 @property BOOL delayedReconfiguration;
 @property BOOL delayedThenStable;
 @property BOOL switched;
@@ -69,13 +76,18 @@ static NSMutableDictionary *Screen(NSInteger ident, NSInteger x, NSInteger y, BO
 }
 - (NSArray *)readDisplaysWithError:(NSError **)error {
     self.reads++;
+    if (self.modeIDEveryRead || self.reads == self.modeIDEditAtRead || (self.commits && self.modeIDChurnReadsAfterCommit)) {
+        if (self.commits && self.modeIDChurnReadsAfterCommit) self.modeIDChurnReadsAfterCommit--;
+        NSMutableDictionary *item=[self find:1 in:self.screens];
+        item[@"modeID"]=@([item[@"modeID"] unsignedIntegerValue]+1);
+    }
     if (self.modeMissingReads) {
         self.modeMissingReads--;
         NSMutableArray *partial = [NSMutableArray array];
         for (NSDictionary *item in self.screens) {
             NSMutableDictionary *copy = item.mutableCopy;
             if ([copy[@"displayID"] unsignedIntegerValue] == self.missingModeID) {
-                for (NSString *key in @[@"modeToken", @"modeWidth", @"modeHeight", @"pixelWidth", @"pixelHeight", @"refreshRate", @"modeID", @"modeFlags"])
+                for (NSString *key in @[@"modeToken", @"modeWidth", @"modeHeight", @"pixelWidth", @"pixelHeight", @"refreshRate", @"modeID", @"modeFlags", @"modeUsableForDesktopGUI"])
                     [copy removeObjectForKey:key];
             }
             [partial addObject:copy];
@@ -105,8 +117,12 @@ static NSMutableDictionary *Screen(NSInteger ident, NSInteger x, NSInteger y, BO
 }
 - (BOOL)setModeOfDisplay:(CGDirectDisplayID)displayID token:(id)modeToken error:(NSError **)error {
     (void)error; [self.calls addObject:[NSString stringWithFormat:@"mode:%u", displayID]];
-    if (self.failMode) return NO;
+    if (self.failMode) { if (error) *error=self.modeError; return NO; }
     NSMutableDictionary *item = [self find:displayID in:self.staged];
+    if (self.rejectInactiveFollowerMode && ![item[@"active"] boolValue] && [item[@"mirrorOf"] unsignedIntValue]) {
+        if (error) *error=[NSError errorWithDomain:@"SyntheticModeSetter" code:1001 userInfo:@{NSLocalizedDescriptionKey:@"Synthetic inactive mirror follower rejects mode write"}];
+        return NO;
+    }
     [item addEntriesFromDictionary:modeToken]; item[@"modeToken"] = modeToken;
     item[@"logicalWidth"] = item[@"modeWidth"]; item[@"logicalHeight"] = item[@"modeHeight"];
     return YES;
@@ -115,6 +131,11 @@ static NSMutableDictionary *Screen(NSInteger ident, NSInteger x, NSInteger y, BO
     (void)error; [self.calls addObject:[NSString stringWithFormat:@"origin:%u:%d:%d", displayID, x, y]];
     if (self.failOrigin) return NO;
     if (self.generationDuringStage) { self.reconfigurationGeneration++; self.generationDuringStage = NO; }
+    if (self.modeIDEditDuringStage) {
+        NSMutableDictionary *item=[self find:1 in:self.screens];
+        item[@"modeID"]=@([item[@"modeID"] unsignedIntegerValue]+1);
+        self.modeIDEditDuringStage=NO;
+    }
     if (self.foreignEditDuringStage) {
         [self find:2 in:self.screens][@"x"] = @-2400;
         self.foreignEditDuringStage = NO;
@@ -135,6 +156,8 @@ static NSMutableDictionary *Screen(NSInteger ident, NSInteger x, NSInteger y, BO
     if (!self.suppressCommit) self.screens = self.staged;
     self.staged = nil; self.reconfigurationGeneration++;
     if (self.modeMutationAfterCommit) [self find:1 in:self.screens][@"refreshRate"] = @30;
+    if (self.modeIDsAfterCommit) for (NSMutableDictionary *item in self.screens)
+        item[@"modeID"]=@([item[@"modeID"] unsignedIntegerValue]+1000);
     if (self.foreignAfterCommit) [self.screens addObject:Screen(9, 7000, 0, NO, 800, 600, NO)];
     self.waits = 0;
     if (self.modeMissingAfterCommit) { self.modeMissingReads = self.modeMissingAfterCommit; self.modeMissingAfterCommit = 0; }
@@ -174,6 +197,146 @@ static void AddNew(FakeBackend *backend) { [backend.screens addObject:Screen(3, 
 static BOOL Configure(YMDisplayTopology *topology, YMDisplayTopologySnapshot *snapshot) {
     NSError *error = nil;
     return [topology configureAndVerifyNewDisplay:3 width:1920 height:1080 hiDPI:NO baseline:snapshot error:&error];
+}
+// Issue-shaped synthetic topology only: no claim that these mode tokens or
+// setter behavior reproduce any reporter's particular display driver.
+static FakeBackend *MirroredRotatedFixture(void) {
+    FakeBackend *backend=[FakeBackend new];
+    NSMutableDictionary *root=Screen(1,0,0,YES,1920,1080,YES);
+    root[@"inMirrorSet"]=@YES;
+    NSMutableDictionary *follower=Screen(2,0,0,NO,1920,1080,YES);
+    follower[@"builtin"]=@YES; follower[@"active"]=@NO;
+    follower[@"mirrorOf"]=@1; follower[@"inMirrorSet"]=@YES;
+    NSMutableDictionary *rotated=Screen(4,-900,0,NO,900,1600,YES);
+    rotated[@"rotation"]=@90;
+    backend.screens=[NSMutableArray arrayWithArray:@[root,follower,rotated]];
+    backend.rejectInactiveFollowerMode=YES;
+    return backend;
+}
+static void CheckOriginalMirrorAndRotation(FakeBackend *backend) {
+    NSDictionary *root=[backend find:1 in:backend.screens];
+    NSDictionary *follower=[backend find:2 in:backend.screens];
+    NSDictionary *rotated=[backend find:4 in:backend.screens];
+    Check([root[@"main"] boolValue]&&[root[@"active"] boolValue]&&[root[@"inMirrorSet"] boolValue],@"existing mirror root remains main and active");
+    Check([follower[@"mirrorOf"] unsignedIntValue]==1&&[follower[@"inMirrorSet"] boolValue]&&![follower[@"active"] boolValue],@"existing inactive mirror follower retains its edge");
+    Check([rotated[@"rotation"] integerValue]==90&&[rotated[@"x"] integerValue]==-900&&[rotated[@"y"] integerValue]==0
+        &&[rotated[@"logicalWidth"] integerValue]==900&&[rotated[@"logicalHeight"] integerValue]==1600,@"rotated external retains orientation and bounds");
+}
+static void RunEquivalentModeRegressions(void) {
+    for (NSNumber *changedDisplay in @[@2,@1,@4]) {
+        FakeBackend *backend=MirroredRotatedFixture();
+        YMDisplayTopology *topology=[[YMDisplayTopology alloc] initWithBackend:backend];
+        YMDisplayTopologySnapshot *snapshot=Baseline(topology); AddNew(backend);
+        NSMutableDictionary *changed=[backend find:changedDisplay.unsignedIntegerValue in:backend.screens];
+        changed[@"modeID"]=@([changed[@"modeID"] unsignedIntegerValue]+1000);
+        NSError *error=nil;
+        BOOL accepted=[topology configureAndVerifyNewDisplay:3 width:1920 height:1080 hiDPI:NO baseline:snapshot error:&error];
+        Check(accepted,[NSString stringWithFormat:@"equivalent mode renumber on display %@ permits creation without rewriting saved mode (error %@)",changedDisplay,error]);
+        for (NSNumber *ident in @[@1,@2,@4]) Check(![backend.calls containsObject:[NSString stringWithFormat:@"mode:%@",ident]],@"physically equivalent existing modes are not rewritten");
+        Check(![backend.calls containsObject:@"mirror:2:0"]&&![backend.calls containsObject:@"origin:2:0:0"],@"existing follower is neither detached nor repositioned");
+        Check([topology isExtendedTarget:3 width:1920 height:1080 hiDPI:NO],@"new extended target admitted after complete verification");
+        CheckOriginalMirrorAndRotation(backend);
+        [backend.screens removeObject:[backend find:3 in:backend.screens]];
+        NSUInteger priorCalls=backend.calls.count;
+        Check([topology restoreAndVerifySnapshot:snapshot excludingDisplayID:3 error:NULL],@"ID-only mode changes do not prevent verified removal recovery");
+        Check(backend.calls.count==priorCalls,@"equivalent removal recovery performs no redundant writes");
+        CheckOriginalMirrorAndRotation(backend);
+    }
+    FakeBackend *backend=MirroredRotatedFixture();
+    YMDisplayTopology *topology=[[YMDisplayTopology alloc] initWithBackend:backend];
+    YMDisplayTopologySnapshot *snapshot=Baseline(topology); AddNew(backend); backend.modeIDsAfterCommit=YES;
+    Check(Configure(topology,snapshot),@"mode IDs renumbered by transaction do not reject an equivalent final topology");
+    CheckOriginalMirrorAndRotation(backend);
+    [backend.screens removeObject:[backend find:3 in:backend.screens]];
+    NSUInteger calls=backend.calls.count;
+    Check([topology restoreAndVerifySnapshot:snapshot excludingDisplayID:3 error:NULL]&&backend.calls.count==calls,@"post-commit mode renumber remains read-only recoverable");
+}
+static void RunModeSafetyRegressions(void) {
+    // Every non-ID mode field still matters, including both HiDPI dimensions.
+    for (NSString *field in @[@"modeWidth",@"modeHeight",@"pixelWidth",@"pixelHeight",@"refreshRate",@"modeFlags",@"modeUsableForDesktopGUI"]) {
+        FakeBackend *backend=MirroredRotatedFixture();
+        YMDisplayTopology *topology=[[YMDisplayTopology alloc] initWithBackend:backend];
+        YMDisplayTopologySnapshot *snapshot=Baseline(topology); AddNew(backend);
+        NSMutableDictionary *follower=[backend find:2 in:backend.screens];
+        follower[field]=[field isEqual:@"modeUsableForDesktopGUI"]?@NO:@([follower[field] integerValue]+1);
+        Check(!Configure(topology,snapshot),[NSString stringWithFormat:@"actual follower %@ change cannot be silently accepted",field]);
+        Check([backend.calls containsObject:@"mode:2"]&&backend.commits==0&&backend.cancels==1,@"real follower drift still requires a supported mode restore");
+    }
+    FakeBackend *backend=MirroredRotatedFixture();
+    YMDisplayTopology *topology=[[YMDisplayTopology alloc] initWithBackend:backend];
+    backend.modeIDEveryRead=YES;
+    Check([topology captureSnapshotWithError:NULL]==nil&&backend.calls.count==0,@"capture cannot freeze continuously renumbering observations");
+    for (NSUInteger stage=0;stage<2;stage++) {
+        backend=MirroredRotatedFixture(); topology=[[YMDisplayTopology alloc] initWithBackend:backend];
+        YMDisplayTopologySnapshot *snapshot=Baseline(topology); AddNew(backend);
+        if (stage==0) backend.modeIDEditAtRead=backend.reads+2; else backend.modeIDEditDuringStage=YES;
+        NSError *error=nil;
+        Check(![topology configureAndVerifyNewDisplay:3 width:1920 height:1080 hiDPI:NO baseline:snapshot error:&error],@"mode-ID race between observations still refuses a transaction");
+        Check(error.code==(stage==0?20:22)&&backend.commits==0,@"ID-only concurrent edit retains precise preflight/precommit guard");
+        Check(stage==0?backend.calls.count==0:backend.cancels==1,@"concurrent mode change cancels before applying anything");
+        [backend.screens removeObject:[backend find:3 in:backend.screens]];
+        [backend find:4 in:backend.screens][@"x"]=@-800;
+        NSUInteger previousCalls=backend.calls.count;
+        Check(![topology restoreAndVerifySnapshot:snapshot excludingDisplayID:3 error:NULL]&&backend.calls.count==previousCalls,@"race still latches rollback read-only instead of reverting later layout");
+    }
+    for (NSNumber *churnCount in @[@100,@20]) {
+        backend=MirroredRotatedFixture(); topology=[[YMDisplayTopology alloc] initWithBackend:backend];
+        YMDisplayTopologySnapshot *churnBaseline=Baseline(topology); AddNew(backend);
+        backend.modeIDChurnReadsAfterCommit=churnCount.unsignedIntegerValue;
+        NSError *churnError=nil;
+        BOOL accepted=[topology configureAndVerifyNewDisplay:3 width:1920 height:1080 hiDPI:NO baseline:churnBaseline error:&churnError];
+        if (churnCount.unsignedIntegerValue==100) {
+            Check(!accepted&&churnError.code==17&&backend.waits==30,@"continuous post-commit mode-ID churn exhausts bounded verification instead of admitting");
+        } else {
+            Check(accepted&&backend.waits>=24,@"settled mode-ID replacement needs five consecutive identical observations");
+        }
+    }
+    backend=MirroredRotatedFixture(); topology=[[YMDisplayTopology alloc] initWithBackend:backend];
+    YMDisplayTopologySnapshot *snapshot=Baseline(topology); AddNew(backend);
+    [backend find:4 in:backend.screens][@"rotation"]=@270;
+    Check(!Configure(topology,snapshot)&&backend.calls.count==0,@"changed external rotation remains a refusal without writes");
+    [backend.screens removeObject:[backend find:3 in:backend.screens]];
+    Check(![topology restoreAndVerifySnapshot:snapshot excludingDisplayID:3 error:NULL]&&backend.calls.count==0,@"rotation refusal keeps recovery read-only");
+}
+static void RunModeDiagnosticRegressions(void) {
+    NSDictionary *roles=@{@1:@"existing mirror primary",@2:@"existing mirror follower",@4:@"existing extended display",@3:@"new virtual display"};
+    NSSet *modeKeys=[NSSet setWithArray:@[@"modeWidth",@"modeHeight",@"pixelWidth",@"pixelHeight",@"refreshRate",@"modeFlags",@"modeID",@"modeUsableForDesktopGUI"]];
+    NSSet *detailKeys=[NSSet setWithArray:@[@"operation",@"role",@"cgError",@"active",@"main",@"builtin",@"rotation",@"savedMode",@"currentMode"]];
+    for (NSNumber *ident in @[@1,@2,@4,@3]) {
+        FakeBackend *backend=MirroredRotatedFixture();
+        for (NSMutableDictionary *item in backend.screens) {
+            item[@"identity"]=[NSString stringWithFormat:@"PRIVATE-IDENTITY-CANARY-%@",item[@"displayID"]];
+            NSMutableDictionary *token=[item[@"modeToken"] mutableCopy]; token[@"privateMetadata"]=@"PRIVATE-TOKEN-CANARY"; item[@"modeToken"]=token;
+        }
+        YMDisplayTopology *topology=[[YMDisplayTopology alloc] initWithBackend:backend];
+        YMDisplayTopologySnapshot *snapshot=Baseline(topology); AddNew(backend);
+        NSMutableDictionary *changed=[backend find:ident.unsignedIntegerValue in:backend.screens];
+        changed[@"pixelWidth"]=@([changed[@"pixelWidth"] integerValue]+1);
+        backend.failMode=YES;
+        NSError *underlying=[NSError errorWithDomain:@"SyntheticUnderlying" code:5 userInfo:@{NSLocalizedDescriptionKey:@"PRIVATE-UNDERLYING-CANARY"}];
+        backend.modeError=[NSError errorWithDomain:@"SyntheticCGError" code:1001 userInfo:@{
+            NSLocalizedDescriptionKey:@"PRIVATE-ERROR-TEXT-CANARY", NSUnderlyingErrorKey:underlying,@"privateData":@"PRIVATE-CREDENTIAL-CANARY"}];
+        NSError *error=nil;
+        Check(![topology configureAndVerifyNewDisplay:3 width:1920 height:1080 hiDPI:NO baseline:snapshot error:&error],@"mode-setting failure with role context still fails closed");
+        NSDictionary *details=error.userInfo[YMDisplayTopologyDiagnosticsKey];
+        Check([error.domain isEqual:@"SyntheticCGError"]&&error.code==1001&&[details[@"cgError"] integerValue]==1001,@"diagnostics preserve returned domain and numeric CGError");
+        Check([details[@"role"] isEqual:roles[ident]]&&[details[@"operation"] isEqual:@"setDisplayMode"],@"diagnostics identify failing display role without an identifier");
+        Check([[NSSet setWithArray:details.allKeys] isEqual:detailKeys],@"diagnostics expose only allowlisted role/mode context");
+        Check([details[@"active"] isEqual:changed[@"active"]]&&[details[@"main"] isEqual:changed[@"main"]]
+            &&[details[@"builtin"] isEqual:changed[@"builtin"]]&&[details[@"rotation"] isEqual:changed[@"rotation"]],@"diagnostics retain relevant current flags and rotation");
+        for (NSString *key in @[@"savedMode",@"currentMode"]) {
+            NSDictionary *mode=details[key];
+            Check([[NSSet setWithArray:mode.allKeys] isEqual:modeKeys],@"mode diagnostics contain exactly numeric mode properties");
+            for (id value in mode.allValues) Check([value isKindOfClass:NSNumber.class]&&isfinite([value doubleValue]),@"diagnostic mode values are finite numbers");
+        }
+        Check(![details[@"savedMode"][@"pixelWidth"] isEqual:details[@"currentMode"][@"pixelWidth"]],@"saved and failing current mode difference is visible");
+        Check([[NSSet setWithArray:error.userInfo.allKeys] isEqual:[NSSet setWithArray:@[NSLocalizedDescriptionKey,YMDisplayTopologyDiagnosticsKey]]],@"underlying errors and arbitrary metadata are not copied");
+        NSData *json=[NSJSONSerialization dataWithJSONObject:error.userInfo options:0 error:NULL];
+        NSString *serialized=[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
+        Check(json!=nil&&![serialized containsString:@"CANARY"]&&![serialized containsString:@"modeToken"]&&![serialized containsString:@"displayID"]
+            &&![serialized containsString:@"identity"]&&![serialized containsString:@"serial"]&&![serialized containsString:@"vendor"],@"serialized diagnostic has no identities tokens private text or private metadata");
+        Check([error.localizedDescription containsString:roles[ident]]&&[error.localizedDescription containsString:@"1001"],@"user-visible error names role and CGError");
+    }
 }
 static void RunTests(void) {
     FakeBackend *b = [FakeBackend new]; YMDisplayTopology *t = [[YMDisplayTopology alloc] initWithBackend:b];
@@ -327,7 +490,7 @@ static void RunTests(void) {
     b = [FakeBackend new];
     follower = Screen(4, -2560, 240, NO, 2560, 1440, YES);
     follower[@"mirrorOf"] = @2; follower[@"inMirrorSet"] = @YES; follower[@"active"] = @NO;
-    for (NSString *key in @[@"modeToken", @"modeWidth", @"modeHeight", @"pixelWidth", @"pixelHeight", @"refreshRate", @"modeID", @"modeFlags"])
+    for (NSString *key in @[@"modeToken", @"modeWidth", @"modeHeight", @"pixelWidth", @"pixelHeight", @"refreshRate", @"modeID", @"modeFlags", @"modeUsableForDesktopGUI"])
         [follower removeObjectForKey:key];
     [b find:2 in:b.screens][@"inMirrorSet"] = @YES; [b.screens addObject:follower];
     t = [[YMDisplayTopology alloc] initWithBackend:b]; s = Baseline(t); AddNew(b);
@@ -418,4 +581,11 @@ static void RunTests(void) {
 
     printf("Display topology: %lu checks passed (synthetic backend; no live display changes).\n", (unsigned long)checks);
 }
-int main(void) { @autoreleasepool { RunTests(); } return 0; }
+int main(void) { @autoreleasepool {
+    NSString *regression=NSProcessInfo.processInfo.environment[@"YOMADO_TOPOLOGY_REGRESSION"];
+    if ([regression isEqual:@"equivalent-mode"]) RunEquivalentModeRegressions();
+    else if ([regression isEqual:@"mode-safety"]) RunModeSafetyRegressions();
+    else if ([regression isEqual:@"mode-diagnostics"]) RunModeDiagnosticRegressions();
+    else { RunEquivalentModeRegressions(); RunModeSafetyRegressions(); RunModeDiagnosticRegressions(); RunTests(); }
+    if (regression) printf("Display topology regression %s: %lu checks passed (synthetic backend).\n",regression.UTF8String,(unsigned long)checks);
+} return 0; }

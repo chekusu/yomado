@@ -10,13 +10,18 @@
 @property NSUInteger creates;
 @property NSUInteger destroys;
 @property CGDirectDisplayID fixtureID;
+@property NSUInteger lastWidth;
+@property NSUInteger lastHeight;
+@property BOOL lastHiDPI;
+@property(copy) NSString *lastName;
 @end
 @implementation YMFakeDisplay
 - (instancetype)init { if ((self = [super init])) _createResult = YES; return self; }
 - (BOOL)isCreated { return self.live; }
 - (CGDirectDisplayID)displayID { return self.live ? self.fixtureID : 0; }
 - (BOOL)createWithWidth:(NSUInteger)w height:(NSUInteger)h hiDPI:(BOOL)hiDPI name:(NSString *)name error:(NSError **)error {
-    (void)w; (void)h; (void)hiDPI; (void)name; self.creates++;
+    self.lastWidth = w; self.lastHeight = h; self.lastHiDPI = hiDPI; self.lastName = [name copy];
+    self.creates++;
     self.live = self.createResult;
     if (!self.createResult && error) *error = [NSError errorWithDomain:@"fixture" code:1 userInfo:nil];
     return self.createResult;
@@ -66,61 +71,6 @@
 }
 @end
 
-// Exercise production approval/candidate logic with synthetic identities only.
-@interface YMAppWorkspace (YMConfirmationTestDeclarations)
-- (void)refreshInventory;
-- (NSArray *)runningApplicationsForBundleIdentifier:(NSString *)bundle;
-- (NSArray *)matchedWindowsForApplication:(NSRunningApplication *)app sourceFilter:(NSNumber *)filter
-    visibleCount:(NSUInteger *)visibleCount error:(NSError **)error;
-- (NSArray *)candidatesForApplication:(NSRunningApplication *)app sourceFilter:(NSNumber *)filter error:(NSError **)error;
-@end
-@interface YMConfirmationApplication : NSObject
-@property(nonatomic) pid_t processIdentifier;
-@property(nonatomic, copy) NSString *localizedName;
-@property(nonatomic, copy) NSString *bundleIdentifier;
-@property(nonatomic, copy) NSDate *launchDate;
-@property(nonatomic, strong) NSURL *bundleURL;
-@property(nonatomic) BOOL terminated;
-@end
-@implementation YMConfirmationApplication
-- (BOOL)isTerminated { return _terminated; }
-@end
-@interface YMConfirmationWorkspace : YMAppWorkspace
-@property(nonatomic, copy) NSArray<NSDictionary *> *fixtureWindows;
-@property NSArray<NSDictionary *> *fixtureMatched;
-@property YMConfirmationApplication *fixtureApplication;
-@end
-@implementation YMConfirmationWorkspace
-- (BOOL)accessibilityTrusted { return YES; }
-- (void)setFixtureWindows:(NSArray<NSDictionary *> *)windows {
-    _fixtureWindows = windows;
-    [self setValue:windows forKey:@"windows"];
-    [self setValue:@YES forKey:@"inventoryValid"];
-    [self setValue:@[@101, @202] forKey:@"ownedIDs"];
-}
-- (void)refreshInventory {}
-- (NSArray *)rowsForDisplayID:(CGDirectDisplayID)ID {
-    for (NSDictionary *window in self.fixtureWindows)
-        if ([window[@"displayID"] unsignedIntValue] == ID)
-            return @[@{@"bundleIdentifier": self.fixtureApplication.bundleIdentifier,
-                @"appName": self.fixtureApplication.localizedName}];
-    return @[];
-}
-- (NSArray *)runningApplicationsForBundleIdentifier:(NSString *)bundle {
-    return [bundle isEqual:self.fixtureApplication.bundleIdentifier] ? @[self.fixtureApplication] : @[];
-}
-- (NSArray *)matchedWindowsForApplication:(NSRunningApplication *)app sourceFilter:(NSNumber *)filter
-    visibleCount:(NSUInteger *)visibleCount error:(NSError **)error {
-    (void)error;
-    if (visibleCount) {
-        *visibleCount = 0;
-        for (NSDictionary *window in self.fixtureWindows)
-            if ([window[@"pid"] intValue] == app.processIdentifier && YMWorkspaceMatchesSource(window, filter)) (*visibleCount)++;
-    }
-    return self.fixtureMatched ?: @[];
-}
-@end
-
 @interface YMFakeController : ADController
 @property NSUInteger inventoryUpdates;
 @property NSUInteger panelCheckpoints;
@@ -133,11 +83,9 @@
 @property NSUInteger resumedTerminations;
 @property BOOL deferTopologyOperations;
 @property BOOL useRealPanelPresentation;
-@property BOOL useRealUnmovableConfirmation;
-@property BOOL useRealStop;
-@property BOOL restoreApplicationsFails;
-@property NSModalResponse confirmationResponse;
-@property NSUInteger confirmationRuns;
+@property BOOL useProductionAppRestore;
+@property BOOL useProductionUnmovableConfirmation;
+@property BOOL useProductionStop;
 @property NSMutableArray<NSString *> *quitEvents;
 @property NSMutableArray<NSDictionary *> *pendingTopologyOperations;
 - (void)runNextTopologyOperation;
@@ -164,12 +112,15 @@
 - (void)saveDisplayProfiles { self.saves++; }
 - (void)reportTopologyError:(NSError *)error { (void)error; self.reports++; }
 - (void)powerAssertions:(BOOL)on { self.systemAssertion = self.displayAssertion = on && !self.powerFails ? 1 : 0; }
-- (BOOL)restoreApplicationsForDisplayID:(CGDirectDisplayID)displayID { (void)displayID; return !self.restoreApplicationsFails; }
-- (BOOL)confirmUnmovableWindowsOnDisplayIDs:(NSArray<NSNumber *> *)displayIDs {
-    return self.useRealUnmovableConfirmation ? [super confirmUnmovableWindowsOnDisplayIDs:displayIDs] : YES;
+- (BOOL)restoreApplicationsForDisplayID:(CGDirectDisplayID)displayID {
+    if (self.useProductionAppRestore) return [super restoreApplicationsForDisplayID:displayID];
+    (void)displayID;
+    return YES;
 }
-- (NSModalResponse)runUnmovableWindowsConfirmation:(NSString *)summary {
-    (void)summary; self.confirmationRuns++; return self.confirmationResponse;
+- (BOOL)confirmUnmovableWindowsOnDisplayIDs:(NSArray<NSNumber *> *)displayIDs {
+    if (self.useProductionUnmovableConfirmation) return [super confirmUnmovableWindowsOnDisplayIDs:displayIDs];
+    (void)displayIDs;
+    return YES;
 }
 - (void)logQuitStep:(NSString *)step {
     if (!self.quitEvents) self.quitEvents = [NSMutableArray array];
@@ -184,8 +135,15 @@
     self.terminationAfterTopologyRecovery=NO;
 }
 - (BOOL)writeStateEnding:(BOOL)end { (void)end; return YES; }
+- (YMManagedDisplay *)newProfileWithOrdinal:(NSUInteger)ordinal name:(NSString *)name width:(NSUInteger)width height:(NSUInteger)height hiDPI:(BOOL)hiDPI {
+    YMManagedDisplay *profile = [super newProfileWithOrdinal:ordinal name:name width:width height:height hiDPI:hiDPI];
+    YMFakeDisplay *fake = [YMFakeDisplay new];
+    fake.fixtureID = (CGDirectDisplayID)(300 + ordinal);
+    profile.display = fake;
+    return profile;
+}
 - (void)stop:(id)sender {
-    if (self.useRealStop) { [super stop:sender]; return; }
+    if (self.useProductionStop) { [super stop:sender]; return; }
     (void)sender; self.stopCalls++;
     // The termination decision is production logic. This boundary models the
     // actual stop outcome: the last owned output is gone, recovery still fails.
@@ -201,6 +159,99 @@
             [self resumeTerminationAfterTopologyRecovery:recovered];
         }];
     }
+}
+@end
+
+@interface YMUnmovableWorkspace : NSObject
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSArray<NSDictionary *> *> *windowsByDisplayID;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *pendingReadsByDisplayID;
+@property(nonatomic, strong) NSMutableSet<NSNumber *> *neverReadyDisplayIDs;
+@property(nonatomic, strong) NSMutableArray<NSNumber *> *queriedDisplayIDs;
+@property(nonatomic, strong) NSMutableArray<NSNumber *> *allowedDisplayIDs;
+@property(nonatomic, strong) NSMutableArray<NSNumber *> *restoreDisplayIDs;
+@property(nonatomic) CGDirectDisplayID restoreFailureDisplayID;
+@property(nonatomic) NSUInteger cancelAllowanceCalls;
+@property(nonatomic) NSUInteger closeTransactionDepth;
+@property(nonatomic) NSUInteger completedTransactions;
+- (void)beginCloseTransaction;
+- (void)endCloseTransaction;
+- (NSArray<NSDictionary *> *)unmovableWindowsForDisplayID:(CGDirectDisplayID)displayID;
+- (void)allowUnmovableWindowsOnDisplayID:(CGDirectDisplayID)displayID;
+- (void)cancelUnmovableWindowAllowances;
+- (BOOL)inventoryReadyForClosingDisplayID:(CGDirectDisplayID)displayID;
+- (BOOL)restoreDisplayID:(CGDirectDisplayID)displayID error:(NSError **)error;
+- (BOOL)needsRestoreForDisplayID:(CGDirectDisplayID)displayID;
+@end
+@implementation YMUnmovableWorkspace
+- (instancetype)init {
+    if ((self = [super init])) {
+        _windowsByDisplayID = [NSMutableDictionary dictionary];
+        _pendingReadsByDisplayID = [NSMutableDictionary dictionary];
+        _neverReadyDisplayIDs = [NSMutableSet set];
+        _queriedDisplayIDs = [NSMutableArray array];
+        _allowedDisplayIDs = [NSMutableArray array];
+        _restoreDisplayIDs = [NSMutableArray array];
+    }
+    return self;
+}
+- (NSArray<NSDictionary *> *)unmovableWindowsForDisplayID:(CGDirectDisplayID)displayID {
+    NSNumber *key = @(displayID);
+    [self.queriedDisplayIDs addObject:key];
+    if ([self.neverReadyDisplayIDs containsObject:key]) return nil;
+    NSUInteger pendingReads = self.pendingReadsByDisplayID[key].unsignedIntegerValue;
+    if (pendingReads) {
+        self.pendingReadsByDisplayID[key] = @(pendingReads - 1);
+        return nil;
+    }
+    return self.windowsByDisplayID[key] ?: @[];
+}
+- (void)allowUnmovableWindowsOnDisplayID:(CGDirectDisplayID)displayID {
+    [self.allowedDisplayIDs addObject:@(displayID)];
+}
+- (void)beginCloseTransaction {
+    if (self.closeTransactionDepth++ == 0) [self cancelUnmovableWindowAllowances];
+}
+- (void)endCloseTransaction {
+    if (self.closeTransactionDepth && --self.closeTransactionDepth == 0) {
+        [self cancelUnmovableWindowAllowances];
+        self.completedTransactions++;
+    }
+}
+- (void)cancelUnmovableWindowAllowances {
+    self.cancelAllowanceCalls++;
+    [self.allowedDisplayIDs removeAllObjects];
+}
+- (BOOL)inventoryReadyForClosingDisplayID:(CGDirectDisplayID)displayID {
+    (void)displayID;
+    return YES;
+}
+- (BOOL)restoreDisplayID:(CGDirectDisplayID)displayID error:(NSError **)error {
+    [self.restoreDisplayIDs addObject:@(displayID)];
+    if (displayID == self.restoreFailureDisplayID) {
+        if (error) *error = [NSError errorWithDomain:@"fixture" code:8 userInfo:nil];
+        return NO;
+    }
+    return YES;
+}
+- (BOOL)needsRestoreForDisplayID:(CGDirectDisplayID)displayID { (void)displayID; return NO; }
+- (BOOL)accessibilityTrusted { return YES; }
+@end
+
+@interface YMUnmovableController : YMFakeController
+@property(nonatomic, copy) NSString *confirmationSummary;
+@property(nonatomic) BOOL confirmationResponse;
+@property(nonatomic) NSUInteger confirmationCalls;
+@property(nonatomic) NSUInteger applicationErrors;
+@end
+@implementation YMUnmovableController
+- (BOOL)confirmLeavingUnmovableWindows:(NSString *)summary {
+    self.confirmationCalls++;
+    self.confirmationSummary = summary;
+    return self.confirmationResponse;
+}
+- (void)reportApplicationError:(NSError *)error fallback:(NSString *)fallback {
+    (void)error; (void)fallback;
+    self.applicationErrors++;
 }
 @end
 
@@ -285,10 +336,129 @@
     return self.adoptedNonemptyOrigins;
 }
 @end
+
+// Close-gate fixture: inventory readiness and a single restore write.
+@interface YMCloseGateWorkspace : NSObject {
+    BOOL _gateReady;
+}
+@property(nonatomic) BOOL inventoryReady;
+@property(nonatomic) BOOL needsRestoreFlag;
+@property(nonatomic) BOOL restoreResult;
+@property(nonatomic) NSUInteger restoreCalls;
+@property(nonatomic) NSUInteger readyPolls;
+@property(nonatomic) NSUInteger needsRestorePolls;
+@property(nonatomic) NSUInteger refreshesBeforeReady;
+@property(nonatomic) NSUInteger closingReadyPolls;
+@property(nonatomic) CGDirectDisplayID lastClosingDisplayID;
+@property(nonatomic) BOOL closingReadinessOverrideEnabled;
+@property(nonatomic) BOOL closingReadinessOverride;
+@property(nonatomic, strong) NSMutableArray<NSString *> *events;
+@end
+@implementation YMCloseGateWorkspace
+- (instancetype)init {
+    if ((self = [super init])) {
+        _gateReady = YES;
+        _restoreResult = YES;
+        _events = [NSMutableArray array];
+    }
+    return self;
+}
+- (void)refreshWithVirtualDisplayIDs:(NSArray *)ids displaySnapshot:(NSArray *)snapshot {
+    (void)ids; (void)snapshot;
+    [self.events addObject:@"refresh"];
+    if (self.refreshesBeforeReady > 0) {
+        self.refreshesBeforeReady--;
+        _gateReady = self.refreshesBeforeReady == 0;
+    }
+}
+- (BOOL)inventoryReady {
+    self.readyPolls++;
+    [self.events addObject:_gateReady ? @"readyYES" : @"readyNO"];
+    return _gateReady;
+}
+- (void)setInventoryReady:(BOOL)inventoryReady {
+    _gateReady = inventoryReady;
+}
+- (BOOL)inventoryReadyForClosingDisplayID:(CGDirectDisplayID)displayID {
+    self.closingReadyPolls++;
+    self.lastClosingDisplayID = displayID;
+    return self.closingReadinessOverrideEnabled ? self.closingReadinessOverride : self.inventoryReady;
+}
+- (BOOL)needsRestoreForDisplayID:(CGDirectDisplayID)displayID {
+    (void)displayID;
+    self.needsRestorePolls++;
+    return self.needsRestoreFlag;
+}
+- (BOOL)restoreDisplayID:(CGDirectDisplayID)displayID error:(NSError **)error {
+    (void)displayID; (void)error;
+    self.restoreCalls++;
+    [self.events addObject:@"restore"];
+    // restoreDisplayID itself requires ready evidence (mirrors production gate).
+    if (!_gateReady) {
+        if (error) *error = [NSError errorWithDomain:@"fixture" code:3 userInfo:nil];
+        return NO;
+    }
+    return self.restoreResult;
+}
+- (void)cancelUnmovableWindowAllowances {}
+- (BOOL)accessibilityTrusted { return YES; }
+- (NSArray *)rowsForDisplayID:(CGDirectDisplayID)displayID { (void)displayID; return @[]; }
+@end
+
+@interface YMCloseGateController : YMFakeController
+@end
+@implementation YMCloseGateController
+- (void)updateInventory {
+    self.inventoryUpdates++;
+    NSArray *ids = self.virtualDisplay.isCreated ? @[@(self.virtualDisplay.displayID)] : @[];
+    [(id)self.appWorkspace refreshWithVirtualDisplayIDs:ids displaySnapshot:@[]];
+}
+- (void)reportApplicationError:(NSError *)error fallback:(NSString *)fallback {
+    (void)error; (void)fallback; self.reports++;
+}
+@end
 @interface YMControllerLegacyRecovery : NSObject
 @property BOOL needsRestoreBeforeRemovingVirtualDisplay;
+@property(nonatomic, weak) YMCloseGateWorkspace *workspaceToInvalidate;
+@property(nonatomic) NSUInteger restoreWeChatCalls;
+@property(nonatomic) NSUInteger refreshSnapshotCount;
+@property(nonatomic, strong) NSArray *lastRefreshSnapshot;
+@property(nonatomic, strong) NSMutableArray<NSString *> *events;
 @end
 @implementation YMControllerLegacyRecovery
+- (instancetype)init {
+    if ((self = [super init])) _events = [NSMutableArray array];
+    return self;
+}
+- (void)refreshWithVirtualDisplayID:(CGDirectDisplayID)displayID displaySnapshot:(NSArray *)snapshot {
+    (void)displayID;
+    self.refreshSnapshotCount++;
+    self.lastRefreshSnapshot = snapshot;
+    [self.events addObject:@"wechatRefresh"];
+}
+- (BOOL)restoreWeChat:(NSError **)error {
+    (void)error;
+    self.restoreWeChatCalls++;
+    [self.events addObject:@"wechatRestore"];
+    // World change after WeChat: inventory key/TTL no longer authorizes close.
+    YMCloseGateWorkspace *gate = self.workspaceToInvalidate;
+    if (gate) {
+        gate.inventoryReady = NO;
+        gate.refreshesBeforeReady = 2;
+    }
+    return YES;
+}
+@end
+
+@interface YMIsolatedWeChatController : YMCloseGateController
+@property(nonatomic) NSUInteger displaySnapshotCalls;
+@property(nonatomic, strong) NSArray *fakeDisplaySnapshot;
+@end
+@implementation YMIsolatedWeChatController
+- (NSArray *)controllerDisplaySnapshot {
+    self.displaySnapshotCalls++;
+    return self.fakeDisplaySnapshot ?: @[];
+}
 @end
 @interface YMUpdateCompletionController : YMFakeController
 @property NSMutableArray *events;
@@ -299,8 +469,32 @@
 - (void)finishUpdateRecoveryWithError:(NSError *)error { self.completionError=error; [self.events addObject:@"finished"]; }
 @end
 
-@interface ADController (YMRenameTestDeclaration)
-- (NSAlert *)makeRenameAlertForProfile:(YMManagedDisplay *)profile;
+@interface ADController (YMProfileEditorTestDeclaration)
+- (YMDisplayProfileEditor *)makeDisplayProfileEditorWithMode:(YMDisplayProfileEditorMode)mode
+                                                       draft:(YMDisplayProfileDraft *)draft;
+- (void)presentProfileEditorForOrdinal:(NSUInteger)ordinal mode:(YMDisplayProfileEditorMode)mode;
+- (void)updateSavedProfilesPresentation;
+@property(nonatomic, strong) YMSavedDisplayProfilesView *savedProfilesView;
+@property(nonatomic, strong) NSTextField *profileActivityLabel;
+@end
+
+@interface YMHeadlessProfileWindow : NSObject
+@property(nonatomic, strong) id attachedSheet;
+@end
+@implementation YMHeadlessProfileWindow
+@end
+
+@interface YMHeadlessProfileEditor : NSObject
+@property(nonatomic, strong) id window;
+@property(nonatomic, copy) BOOL (^submitHandler)(YMDisplayProfileDraft *draft, NSError **error);
+@property(nonatomic, copy) void (^endHandler)(BOOL accepted);
+@property(nonatomic) YMDisplayProfileEditorMode mode;
+- (void)beginSheetForWindow:(NSWindow *)parent;
+- (void)cancel:(id)sender;
+@end
+@implementation YMHeadlessProfileEditor
+- (void)beginSheetForWindow:(NSWindow *)parent { (void)parent; }
+- (void)cancel:(id)sender { (void)sender; if (self.endHandler) self.endHandler(NO); }
 @end
 
 @interface YMRenameText : NSObject
@@ -312,33 +506,66 @@
 @interface YMRenameWindow : NSObject
 @property(nonatomic) BOOL visible;
 @property(nonatomic, strong) id attachedSheet;
+@property(nonatomic, weak) id firstResponder;
+- (BOOL)makeFirstResponder:(id)responder;
 @end
 @implementation YMRenameWindow
+- (BOOL)makeFirstResponder:(id)responder { self.firstResponder = responder; return YES; }
 @end
 
-@interface YMRenameAlert : NSObject
-@property(nonatomic, strong) YMRenameText *accessoryView;
+@interface YMRenameEditorStandIn : NSObject
+@property(nonatomic) YMDisplayProfileEditorMode mode;
+@property(nonatomic, strong) YMDisplayProfileDraft *draft;
+@property(nonatomic, strong) id window;
 @property(nonatomic, weak) YMRenameWindow *parent;
-@property(nonatomic, copy) void (^completion)(NSModalResponse);
+@property(nonatomic, copy) BOOL (^submitHandler)(YMDisplayProfileDraft *draft, NSError **error);
+@property(nonatomic, copy) void (^endHandler)(BOOL accepted);
 @property(nonatomic) NSUInteger begins;
-- (void)beginSheetModalForWindow:(NSWindow *)window
-              completionHandler:(void (^)(NSModalResponse))completion;
-- (void)finish:(NSModalResponse)response;
+@property(nonatomic) BOOL finished;
+@property(nonatomic) BOOL acceptedResult;
+@property(nonatomic, strong) NSError *lastError;
+- (void)beginSheetForWindow:(NSWindow *)window;
+- (void)submitName:(NSString *)name;
+- (void)cancel:(id)sender;
 @end
-@implementation YMRenameAlert
-- (void)beginSheetModalForWindow:(NSWindow *)window
-              completionHandler:(void (^)(NSModalResponse))completion {
+@implementation YMRenameEditorStandIn
+- (instancetype)init {
+    if ((self = [super init])) _window = [NSObject new];
+    return self;
+}
+- (void)beginSheetForWindow:(NSWindow *)window {
     self.parent = (YMRenameWindow *)(id)window;
-    self.parent.attachedSheet = self;
+    self.parent.attachedSheet = self.window;
     self.parent.visible = YES;
-    self.completion = completion;
     self.begins++;
 }
-- (void)finish:(NSModalResponse)response {
+- (void)submitName:(NSString *)name {
+    if (self.finished) return;
+    YMDisplayProfileDraft *value = [[YMDisplayProfileDraft alloc] initWithName:name
+                                                                          width:self.draft.width
+                                                                          hiDPI:self.draft.hiDPI];
+    NSError *error = nil;
+    BOOL ok = self.submitHandler ? self.submitHandler(value, &error) : NO;
+    self.lastError = error;
+    if (!ok) return;
+    self.finished = YES;
+    self.acceptedResult = YES;
     self.parent.attachedSheet = nil;
-    void (^completion)(NSModalResponse) = self.completion;
-    self.completion = nil;
-    if (completion) completion(response);
+    void (^end)(BOOL) = self.endHandler;
+    self.endHandler = nil;
+    self.submitHandler = nil;
+    if (end) end(YES);
+}
+- (void)cancel:(id)sender {
+    (void)sender;
+    if (self.finished) return;
+    self.finished = YES;
+    self.acceptedResult = NO;
+    self.parent.attachedSheet = nil;
+    void (^end)(BOOL) = self.endHandler;
+    self.endHandler = nil;
+    self.submitHandler = nil;
+    if (end) end(NO);
 }
 @end
 
@@ -346,6 +573,12 @@
 @property(nonatomic, strong) id representedObject;
 @end
 @implementation YMRenameMenuItem
+@end
+
+@interface YMFakeStatusItem : NSObject
+@property(nonatomic, strong) NSMenu *menu;
+@end
+@implementation YMFakeStatusItem
 @end
 
 @interface YMRenameEnvironment : NSObject <YMPanelPresentationEnvironment>
@@ -415,18 +648,57 @@
 }
 @end
 
+@interface YMFocusControl : NSObject
+@property(nonatomic, weak) id window;
+@property(nonatomic) BOOL enabled;
+@property(nonatomic) BOOL acceptsFirstResponder;
+@end
+@implementation YMFocusControl
+- (BOOL)isEnabled { return self.enabled; }
+@end
+
+@interface ADController (YMProfileEditorFocusTestAccess)
+@property(nonatomic, weak) id profileEditorOrigin;
+@property(nonatomic) BOOL profileEditorFocusPending;
+@end
+
 @interface YMRenameController : YMFakeController
-@property(nonatomic) NSUInteger alertCreations;
-@property(nonatomic, strong) YMRenameAlert *lastRenameAlert;
+@property(nonatomic) NSUInteger editorCreations;
+@property(nonatomic, strong) YMRenameEditorStandIn *lastEditor;
+@property(nonatomic) YMDisplayProfileEditorMode lastPresentMode;
+@property(nonatomic) NSUInteger lastPresentOrdinal;
+@property(nonatomic) NSUInteger presentCalls;
+@property(nonatomic) NSUInteger restoreFocusCalls;
+@property(nonatomic) BOOL inventoryDrivesPendingRestore;
 @end
 @implementation YMRenameController
-- (NSAlert *)makeRenameAlertForProfile:(YMManagedDisplay *)profile {
-    self.alertCreations++;
-    YMRenameAlert *alert = [YMRenameAlert new];
-    alert.accessoryView = [YMRenameText new];
-    alert.accessoryView.stringValue = profile.friendlyName ?: @"";
-    self.lastRenameAlert = alert;
-    return (NSAlert *)(id)alert;
+- (YMDisplayProfileEditor *)makeDisplayProfileEditorWithMode:(YMDisplayProfileEditorMode)mode
+                                                       draft:(YMDisplayProfileDraft *)draft {
+    self.editorCreations++;
+    YMRenameEditorStandIn *editor = [YMRenameEditorStandIn new];
+    editor.mode = mode;
+    editor.draft = draft;
+    self.lastEditor = editor;
+    return (YMDisplayProfileEditor *)(id)editor;
+}
+- (void)presentProfileEditorForOrdinal:(NSUInteger)ordinal mode:(YMDisplayProfileEditorMode)mode {
+    self.presentCalls++;
+    self.lastPresentOrdinal = ordinal;
+    self.lastPresentMode = mode;
+    [super presentProfileEditorForOrdinal:ordinal mode:mode];
+}
+- (void)restoreProfileEditorFocus {
+    self.restoreFocusCalls++;
+    [super restoreProfileEditorFocus];
+}
+- (void)updateInventory {
+    self.inventoryUpdates++;
+    // Headless stand-in for the production updateInventory pending-restore handoff.
+    // Real AppKit inventory coverage lives in DisplayProfilePanelTests.
+    if (self.inventoryDrivesPendingRestore
+        && self.profileEditorFocusPending && !self.profileEditor && self.window.attachedSheet == nil) {
+        [self restoreProfileEditorFocus];
+    }
 }
 @end
 
@@ -436,7 +708,7 @@ static YMRenameController *RenameController(YMRenameWindow **window, YMRenameEnv
     YMRenameEnvironment *e = [YMRenameEnvironment new];
     YMFakeDisplay *display = [YMFakeDisplay new];
     YMManagedDisplay *p = [YMManagedDisplay new];
-    p.width = 800; p.height = 600; p.ordinal = 1;
+    p.width = 1920; p.height = 1080; p.ordinal = 1;
     p.friendlyName = @"Original";
     p.display = display;
     c.displayProfiles = [NSMutableArray arrayWithObject:p];
@@ -465,99 +737,8 @@ static YMFakeController *Controller(YMFakeTopology **t, YMFakeDisplay **d, YMMan
     c.displayProfiles=[NSMutableArray arrayWithArray:@[*s,*p]]; c.selectedProfile=*p; c.virtualDisplay=*d;
     return c;
 }
-static NSDictionary *ConfirmationWindow(NSRunningApplication *app, CGWindowID ID, CGDirectDisplayID displayID) {
-    return @{@"pid": @(app.processIdentifier), @"windowID": @(ID), @"displayID": @(displayID),
-        @"bundleIdentifier": app.bundleIdentifier ?: @"test.fixture.editor",
-        @"processLaunchDate": app.launchDate ?: [NSDate dateWithTimeIntervalSince1970:123]};
-}
-static YMConfirmationWorkspace *ConfirmationWorkspace(void) {
-    YMConfirmationWorkspace *workspace = [YMConfirmationWorkspace new];
-        workspace.fixtureApplication = [YMConfirmationApplication new];
-    workspace.fixtureApplication.processIdentifier = 77;
-    workspace.fixtureApplication.localizedName = @"Private fixture application";
-    workspace.fixtureApplication.bundleIdentifier = @"test.fixture.editor";
-    workspace.fixtureApplication.launchDate = [NSDate dateWithTimeIntervalSince1970:123];
-    workspace.fixtureApplication.bundleURL = [NSURL URLWithString:@"file:///tmp/test-fixture.app"];
-    workspace.fixtureWindows = @[ConfirmationWindow((NSRunningApplication *)(id)workspace.fixtureApplication, 1, 101)];
-    return workspace;
-}
-static void TestCloseConfirmationScope(void) {
-    YMConfirmationWorkspace *workspace = ConfirmationWorkspace();
-    NSRunningApplication *app = (NSRunningApplication *)(id)workspace.fixtureApplication;
-    [workspace beginCloseTransaction];
-    Expect([workspace unmovableWindowsForDisplayID:101].count == 1, "unmatched window is included in confirmation");
-    [workspace allowUnmovableWindowsOnDisplayID:101];
-    NSError *error = nil;
-    Expect([workspace candidatesForApplication:app sourceFilter:@101 error:&error] != nil,
-        "approved unmatched identity allows matched candidates to return");
-    Expect(![workspace needsRestoreForDisplayID:101], "approved exact unmatched identity can remain for display removal");
-    [workspace beginCloseTransaction];
-    Expect([workspace unmovableWindowsForDisplayID:101].count == 0, "nested stop reuses the current close confirmation");
-    [workspace endCloseTransaction];
-    Expect(![workspace needsRestoreForDisplayID:101], "nested stop does not revoke its enclosing close approval");
-    workspace.fixtureWindows = @[ConfirmationWindow((NSRunningApplication *)(id)workspace.fixtureApplication, 1, 101), ConfirmationWindow((NSRunningApplication *)(id)workspace.fixtureApplication, 2, 101)];
-    Expect([workspace needsRestoreForDisplayID:101], "new window on approved display still requires return");
-    Expect([workspace candidatesForApplication:app sourceFilter:@101 error:&error] == nil && error.code == 7,
-        "new unmatched identity cannot inherit the display approval");
-    [workspace endCloseTransaction];
-    workspace.fixtureWindows = @[ConfirmationWindow((NSRunningApplication *)(id)workspace.fixtureApplication, 1, 101)];
-    Expect([workspace needsRestoreForDisplayID:101], "ending a failed close revokes approval while the display remains");
-    [workspace beginCloseTransaction];
-    Expect([workspace unmovableWindowsForDisplayID:101].count == 1, "next close asks again for unchanged unmatched window");
-    workspace.fixtureWindows = @[ConfirmationWindow((NSRunningApplication *)(id)workspace.fixtureApplication, 1, 101), ConfirmationWindow((NSRunningApplication *)(id)workspace.fixtureApplication, 2, 101)];
-    [workspace allowUnmovableWindowsOnDisplayID:101];
-    Expect([workspace candidatesForApplication:app sourceFilter:@101 error:&error] == nil,
-        "window arriving while the confirmation is open is excluded from approval");
-    workspace.fixtureMatched = @[@{@"windowID": @2}];
-    Expect([workspace candidatesForApplication:app sourceFilter:@101 error:&error].count == 1,
-        "ordinary matching window is returned even beside approved unmatched window");
-    Expect([workspace needsRestoreForDisplayID:101], "matching ordinary window cannot be skipped by final inventory check");
-    workspace.fixtureMatched = @[];
-    NSMutableDictionary *relaunched = [ConfirmationWindow((NSRunningApplication *)(id)workspace.fixtureApplication, 1, 101) mutableCopy];
-    relaunched[@"processLaunchDate"] = [NSDate dateWithTimeIntervalSince1970:456];
-    workspace.fixtureWindows = @[relaunched];
-    Expect([workspace candidatesForApplication:app sourceFilter:@101 error:&error] == nil,
-        "reused process and window IDs from a different launch cannot inherit approval");
-    workspace.fixtureWindows = @[ConfirmationWindow((NSRunningApplication *)(id)workspace.fixtureApplication, 1, 202)];
-    Expect([workspace needsRestoreForDisplayID:202], "approval cannot transfer to another display");
-    [workspace endCloseTransaction];
-    [workspace allowUnmovableWindowsOnDisplayID:202];
-    Expect([workspace needsRestoreForDisplayID:202], "approval outside a close transaction has no effect");
-
-    YMFakeTopology *topology; YMFakeDisplay *display; YMManagedDisplay *profile, *sibling;
-    YMFakeController *controller = Controller(&topology, &display, &profile, &sibling);
-    workspace = ConfirmationWorkspace(); controller.appWorkspace = workspace;
-    controller.useRealUnmovableConfirmation = YES;
-    controller.confirmationResponse = NSAlertSecondButtonReturn;
-    controller.useRealStop = YES;
-    controller.displayProfiles = [NSMutableArray arrayWithObject:sibling];
-    controller.selectedProfile = sibling; controller.virtualDisplay = sibling.display;
-    [controller stop:nil];
-    Expect(controller.confirmationRuns == 1 && controller.showCalls == 0,
-        "cancelled close shows confirmation without opening the control panel");
-    Expect(sibling.display.isCreated && [workspace needsRestoreForDisplayID:101],
-        "cancelled close keeps display and grants no window exemption");
-    controller.confirmationResponse = NSAlertFirstButtonReturn;
-    controller.restoreApplicationsFails = YES;
-    [controller stop:nil];
-    Expect(controller.confirmationRuns == 2 && [workspace needsRestoreForDisplayID:101],
-        "failed window return clears approval through production stop finally");
-    [controller stop:nil];
-    Expect(controller.confirmationRuns == 3, "retry after failed close presents a new confirmation");
-    Expect([controller applicationShouldTerminate:(NSApplication *)(id)[NSObject new]] == NSTerminateCancel && [workspace needsRestoreForDisplayID:101],
-        "failed quit also clears approval through production termination finally");
-    NSUInteger previousRuns = controller.confirmationRuns;
-    [controller applicationShouldTerminate:(NSApplication *)(id)[NSObject new]];
-    Expect(controller.confirmationRuns == previousRuns + 1, "retry after failed quit presents a new confirmation");
-    BOOL privateNameLogged = NO;
-    for (NSString *event in controller.quitEvents)
-        if (event.length && [event containsString:workspace.fixtureApplication.localizedName]) privateNameLogged = YES;
-    Expect(!privateNameLogged, "public quit events do not include the confirmation's application name");
-}
-
 int main(void) {
     @autoreleasepool {
-        TestCloseConfirmationScope();
         Expect(NSApp == nil,"tests begin without NSApplication");
         YMFakeTopology *t; YMFakeDisplay *d; YMManagedDisplay *p,*s;
         YMFakeController *c = Controller(&t,&d,&p,&s);
@@ -834,11 +1015,248 @@ int main(void) {
         Expect(completionController.completionError!=nil && [events isEqual:@[@"restore",@"finished"]],
             "backend failure without NSError cannot be announced as a successful recovery");
 
+        // Production confirmation logic with only inventory and prompt-boundary fakes.
+        {
+            YMUnmovableWorkspace *workspace = [YMUnmovableWorkspace new];
+            workspace.windowsByDisplayID[@101] = @[
+                @{@"appName": @"Editor", @"count": @1},
+                @{@"appName": @"Tool", @"count": @1}
+            ];
+            workspace.windowsByDisplayID[@202] = @[@{@"appName": @"Editor", @"count": @2}];
+            YMUnmovableController *controller = [YMUnmovableController new];
+            controller.appWorkspace = (YMAppWorkspace *)(id)workspace;
+            controller.useProductionUnmovableConfirmation = YES;
+            controller.confirmationResponse = YES;
+            BOOL confirmed = [controller confirmUnmovableWindowsOnDisplayIDs:@[@101, @202]];
+            Expect(confirmed && controller.confirmationCalls == 1,
+                   "production confirmation prompts once for unmovable windows across screens");
+            Expect([controller.confirmationSummary isEqualToString:@"「Editor」3 个窗口、「Tool」1 个窗口"],
+                   "multi-screen confirmation aggregates counts by application");
+            Expect([workspace.allowedDisplayIDs isEqualToArray:@[@101, @202]],
+                   "continuing authorizes the exact displayed screen IDs");
+            Expect(NSApp == nil, "unmovable confirmation tests do not create NSApplication");
+
+            workspace = [YMUnmovableWorkspace new];
+            workspace.windowsByDisplayID[@202] = @[@{@"appName": @"Dialog", @"count": @1}];
+            controller = [YMUnmovableController new];
+            controller.appWorkspace = (YMAppWorkspace *)(id)workspace;
+            controller.useProductionUnmovableConfirmation = YES;
+            controller.confirmationResponse = NO;
+            confirmed = [controller confirmUnmovableWindowsOnDisplayIDs:@[@202]];
+            Expect(!confirmed && controller.confirmationCalls == 1 && workspace.allowedDisplayIDs.count == 0,
+                   "canceling the production confirmation grants no allowance");
+            Expect(workspace.cancelAllowanceCalls == 1,
+                   "canceling clears offered unmovable-window allowances");
+
+            workspace = [YMUnmovableWorkspace new];
+            controller = [YMUnmovableController new];
+            controller.appWorkspace = (YMAppWorkspace *)(id)workspace;
+            controller.useProductionUnmovableConfirmation = YES;
+            controller.confirmationResponse = NO;
+            confirmed = [controller confirmUnmovableWindowsOnDisplayIDs:@[@202]];
+            Expect(confirmed && controller.confirmationCalls == 0 && workspace.allowedDisplayIDs.count == 0,
+                   "an empty unmovable-window list succeeds without prompting or authorizing");
+
+            workspace = [YMUnmovableWorkspace new];
+            workspace.pendingReadsByDisplayID[@202] = @1;
+            workspace.windowsByDisplayID[@202] = @[@{@"appName": @"Dialog", @"count": @1}];
+            controller = [YMUnmovableController new];
+            controller.appWorkspace = (YMAppWorkspace *)(id)workspace;
+            controller.useProductionUnmovableConfirmation = YES;
+            controller.confirmationResponse = YES;
+            confirmed = [controller confirmUnmovableWindowsOnDisplayIDs:@[@202]];
+            Expect(confirmed && workspace.queriedDisplayIDs.count >= 2 && controller.inventoryUpdates >= 2,
+                   "pending inventory is retried until it becomes ready");
+            Expect(controller.confirmationCalls == 1 && [workspace.allowedDisplayIDs isEqualToArray:@[@202]],
+                   "ready inventory is summarized and authorized only after confirmation");
+
+            workspace = [YMUnmovableWorkspace new];
+            [workspace.neverReadyDisplayIDs addObject:@202];
+            controller = [YMUnmovableController new];
+            controller.appWorkspace = (YMAppWorkspace *)(id)workspace;
+            controller.useProductionUnmovableConfirmation = YES;
+            controller.confirmationResponse = YES;
+            NSDate *started = [NSDate date];
+            confirmed = [controller confirmUnmovableWindowsOnDisplayIDs:@[@202]];
+            NSTimeInterval waited = -[started timeIntervalSinceNow];
+            Expect(!confirmed && controller.confirmationCalls == 0 && workspace.allowedDisplayIDs.count == 0,
+                   "inventory timeout retains the screen without prompting or authorizing");
+            Expect(workspace.cancelAllowanceCalls == 1 && controller.applicationErrors == 1,
+                   "inventory timeout clears allowances and reports the blocked close");
+            Expect(waited >= 1.4 && waited < 3.0,
+                   "unmovable inventory readiness wait is bounded near 1.5 seconds");
+
+            YMUnmovableWorkspace *quitWorkspace = [YMUnmovableWorkspace new];
+            quitWorkspace.windowsByDisplayID[@202] = @[@{@"appName": @"Dialog", @"count": @1}];
+            quitWorkspace.restoreFailureDisplayID = 202;
+            YMUnmovableController *quitController = [YMUnmovableController new];
+            YMFakeDisplay *firstDisplay = [YMFakeDisplay new];
+            firstDisplay.live = YES; firstDisplay.fixtureID = 101;
+            YMFakeDisplay *secondDisplay = [YMFakeDisplay new];
+            secondDisplay.live = YES; secondDisplay.fixtureID = 202;
+            YMManagedDisplay *firstProfile = [YMManagedDisplay new]; firstProfile.display = firstDisplay;
+            YMManagedDisplay *secondProfile = [YMManagedDisplay new]; secondProfile.display = secondDisplay;
+            quitController.displayProfiles = [NSMutableArray arrayWithArray:@[firstProfile, secondProfile]];
+            quitController.selectedProfile = firstProfile;
+            quitController.virtualDisplay = firstDisplay;
+            quitController.appWorkspace = (YMAppWorkspace *)(id)quitWorkspace;
+            quitController.useProductionUnmovableConfirmation = YES;
+            quitController.useProductionAppRestore = YES;
+            quitController.confirmationResponse = YES;
+            NSApplicationTerminateReply reply =
+                [quitController applicationShouldTerminate:(NSApplication *)(id)[NSObject new]];
+            Expect(reply == NSTerminateCancel && quitController.stopCalls == 0,
+                   "failure restoring any screen cancels quit before stopping one");
+            Expect(firstDisplay.live && secondDisplay.live &&
+                   [quitWorkspace.restoreDisplayIDs isEqualToArray:@[@101, @202]],
+                   "quit restores every workspace before removing any screen");
+            Expect(quitWorkspace.allowedDisplayIDs.count == 0 && quitWorkspace.cancelAllowanceCalls == 3,
+                   "failed multi-screen quit clears temporary unmovable-window allowances");
+            Expect(quitWorkspace.closeTransactionDepth == 0 && quitWorkspace.completedTransactions == 1,
+                   "failed multi-screen quit ends its consent transaction");
+
+            // Production stop returns on restoration failure before any live display call.
+            YMUnmovableWorkspace *stopWorkspace = [YMUnmovableWorkspace new];
+            stopWorkspace.windowsByDisplayID[@202] = @[@{@"appName": @"Private fixture application", @"count": @1}];
+            stopWorkspace.restoreFailureDisplayID = 202;
+            YMUnmovableController *stopController = [YMUnmovableController new];
+            stopController.displayProfiles = [NSMutableArray arrayWithObject:secondProfile];
+            stopController.selectedProfile = secondProfile;
+            stopController.virtualDisplay = secondDisplay;
+            stopController.appWorkspace = (YMAppWorkspace *)(id)stopWorkspace;
+            stopController.useProductionStop = YES;
+            stopController.useProductionUnmovableConfirmation = YES;
+            stopController.useProductionAppRestore = YES;
+            stopController.confirmationResponse = YES;
+            [stopController stop:nil];
+            Expect(secondDisplay.live && stopWorkspace.allowedDisplayIDs.count == 0 &&
+                   stopWorkspace.closeTransactionDepth == 0 && stopWorkspace.completedTransactions == 1,
+                   "production stop failure clears consent and leaves display alive");
+            Expect(![[stopController.quitEvents componentsJoinedByString:@"\n"] containsString:@"Private fixture application"],
+                   "quit diagnostic events omit localized app names");
+            stopWorkspace.windowsByDisplayID[@202] = @[@{@"appName": @"New dialog application", @"count": @2}];
+            stopController.confirmationResponse = NO;
+            NSUInteger shownBeforeCancel = stopController.showCalls;
+            [stopController stop:nil];
+            Expect(stopController.confirmationCalls == 2 &&
+                   [stopController.confirmationSummary containsString:@"New dialog application"],
+                   "retry prompts with new unmatched windows rather than reusing consent");
+            Expect(secondDisplay.live && stopWorkspace.closeTransactionDepth == 0 &&
+                   stopWorkspace.allowedDisplayIDs.count == 0 && stopWorkspace.completedTransactions == 2,
+                   "canceled retry clears its own transaction and keeps display");
+            Expect(stopController.showCalls == shownBeforeCancel && NSApp == nil,
+                   "canceled close does not open the control panel or instantiate NSApplication");
+        }
+
+        // Group 5: ready wait + single restore write; timeout retains virtual display.
+        {
+            YMFakeTopology *closeT = [YMFakeTopology new];
+            YMFakeDisplay *closeD = [YMFakeDisplay new];
+            closeD.live = YES; closeD.fixtureID = 202;
+            YMManagedDisplay *closeP = [YMManagedDisplay new];
+            closeP.width = 800; closeP.height = 600; closeP.display = closeD; closeP.topologyVerified = YES;
+            YMCloseGateController *closeController = [YMCloseGateController new];
+            closeController.displayTopology = (YMDisplayTopology *)closeT;
+            closeController.displayProfiles = [NSMutableArray arrayWithObject:closeP];
+            closeController.selectedProfile = closeP;
+            closeController.virtualDisplay = closeD;
+            closeController.useProductionAppRestore = YES;
+            YMCloseGateWorkspace *gate = [YMCloseGateWorkspace new];
+            gate.inventoryReady = YES;
+            gate.needsRestoreFlag = NO;
+            gate.restoreResult = YES;
+            closeController.appWorkspace = (YMAppWorkspace *)(id)gate;
+            closeController.windowRecovery = (YMWindowRecovery *)(id)[YMControllerLegacyRecovery new];
+            BOOL restored = [closeController restoreApplicationsForDisplayID:202];
+            Expect(restored && gate.restoreCalls == 1,
+                   "ready inventory restores the display exactly once");
+            Expect(gate.closingReadyPolls > 0 && gate.lastClosingDisplayID == 202,
+                   "production close checks inventory readiness for the target display");
+            Expect(gate.needsRestorePolls >= 1,
+                   "convergence polling observes needsRestore without a second write");
+            Expect(closeD.live && closeD.destroys == 0, "successful restore does not destroy the display");
+
+            gate.restoreCalls = 0; gate.readyPolls = 0; gate.needsRestorePolls = 0; gate.closingReadyPolls = 0;
+            gate.inventoryReady = YES;
+            gate.closingReadinessOverrideEnabled = YES;
+            gate.closingReadinessOverride = NO;
+            gate.refreshesBeforeReady = 0; // never becomes ready
+            NSDate *started = [NSDate date];
+            restored = [closeController restoreApplicationsForDisplayID:202];
+            NSTimeInterval waited = -[started timeIntervalSinceNow];
+            Expect(!restored && gate.restoreCalls == 0 && gate.closingReadyPolls > 0 && gate.readyPolls == 0,
+                   "per-display readiness timeout blocks writes even when global inventory is ready");
+            Expect(waited >= 1.4 && waited < 3.0, "ready wait bounds near 1.5 seconds");
+            Expect(closeD.live && closeD.destroys == 0,
+                   "timeout does not remove the virtual display");
+            Expect(closeController.reports >= 1, "timeout reports and retains the screen");
+
+            // Ready after several refreshes, then a single restore write.
+            gate.restoreCalls = 0; gate.readyPolls = 0; gate.needsRestorePolls = 0; gate.closingReadyPolls = 0;
+            gate.closingReadinessOverrideEnabled = NO;
+            gate.needsRestoreFlag = NO;
+            gate.restoreResult = YES;
+            gate.inventoryReady = NO;
+            gate.refreshesBeforeReady = 3;
+            [gate.events removeAllObjects];
+            restored = [closeController restoreApplicationsForDisplayID:202];
+            Expect(restored && gate.restoreCalls == 1,
+                   "ready after several refreshes restores the display exactly once");
+            Expect(gate.closingReadyPolls >= 3 && gate.readyPolls >= 3,
+                   "controller waits through per-display readiness refreshesBeforeReady");
+
+            // WeChat world-change must happen before the ready wait that authorizes restore.
+            // If wait runs first, WeChat invalidates ready and restoreDisplayID refuses.
+            // Display reads go through controllerDisplaySnapshot — never real CG/NSScreen.
+            YMIsolatedWeChatController *wechatController = [YMIsolatedWeChatController new];
+            wechatController.displayTopology = (YMDisplayTopology *)closeT;
+            wechatController.displayProfiles = [NSMutableArray arrayWithObject:closeP];
+            wechatController.selectedProfile = closeP;
+            wechatController.virtualDisplay = closeD;
+            wechatController.useProductionAppRestore = YES;
+            wechatController.appWorkspace = (YMAppWorkspace *)(id)gate;
+            wechatController.fakeDisplaySnapshot =
+                @[@{@"displayID": @5, @"displayUUID": @"physical",
+                    @"bounds": @{@"x": @0, @"y": @0, @"width": @2560, @"height": @1440},
+                    @"isMain": @YES, @"isActive": @YES, @"isOnline": @YES, @"isVirtual": @NO},
+                  @{@"displayID": @202, @"displayUUID": @"agent",
+                    @"bounds": @{@"x": @2560, @"y": @0, @"width": @2560, @"height": @1440},
+                    @"isMain": @NO, @"isActive": @YES, @"isOnline": @YES, @"isVirtual": @YES}];
+            YMControllerLegacyRecovery *wechatRecovery = [YMControllerLegacyRecovery new];
+            wechatRecovery.needsRestoreBeforeRemovingVirtualDisplay = YES;
+            wechatRecovery.workspaceToInvalidate = gate;
+            wechatController.windowRecovery = (YMWindowRecovery *)(id)wechatRecovery;
+            wechatController.wechatDisplayID = 202;
+            gate.restoreCalls = 0; gate.readyPolls = 0; gate.needsRestorePolls = 0;
+            gate.needsRestoreFlag = NO;
+            gate.restoreResult = YES;
+            gate.inventoryReady = YES;
+            gate.refreshesBeforeReady = 0;
+            [gate.events removeAllObjects];
+            [wechatRecovery.events removeAllObjects];
+            restored = [wechatController restoreApplicationsForDisplayID:202];
+            Expect(wechatRecovery.restoreWeChatCalls == 1, "pending WeChat restore runs during close");
+            Expect(restored && gate.restoreCalls == 1,
+                   "ready wait after WeChat world-change still restores once");
+            Expect(wechatController.displaySnapshotCalls >= 1,
+                   "WeChat close path uses overridable controllerDisplaySnapshot");
+            Expect(wechatRecovery.refreshSnapshotCount == 1 &&
+                   [wechatRecovery.lastRefreshSnapshot isEqual:wechatController.fakeDisplaySnapshot],
+                   "WeChat refresh receives fake snapshot, not live DisplaySnapshot");
+            Expect([wechatRecovery.events indexOfObject:@"wechatRestore"] != NSNotFound &&
+                   [gate.events indexOfObject:@"restore"] != NSNotFound,
+                   "WeChat restore and app restore both recorded");
+            Expect(restored, "WeChat-then-ready-then-restore close path succeeds");
+        }
+
         {
             BOOL seamAvailable = [ADController instancesRespondToSelector:
-                @selector(makeRenameAlertForProfile:)];
-            Expect(seamAvailable, "rename alert construction has a headless boundary");
-            if (!seamAvailable) goto rename_tests_done;
+                @selector(makeDisplayProfileEditorWithMode:draft:)];
+            Expect(seamAvailable, "profile editor factory has a headless boundary");
+            BOOL presentAvailable = [ADController instancesRespondToSelector:
+                @selector(presentProfileEditorForOrdinal:mode:)];
+            Expect(presentAvailable, "profile editor present entry exists");
+            if (!seamAvailable || !presentAvailable) goto rename_tests_done;
 
             YMRenameWindow *w;
             YMRenameEnvironment *e;
@@ -851,12 +1269,17 @@ int main(void) {
             item.representedObject = profile;
             [c renameManagedDisplayFromMenu:(NSMenuItem *)(id)item];
             Expect(c.showCalls == opens + 1, "menu rename uses the normal open entry");
+            Expect(c.presentCalls == 1 && c.lastPresentMode == YMDisplayProfileEditorModeRename
+                   && c.lastPresentOrdinal == profile.ordinal,
+                   "menu rename presents rename mode with stable ordinal");
+            Expect(c.editorCreations == 1 && c.lastEditor.mode == YMDisplayProfileEditorModeRename,
+                   "menu rename uses editor factory");
             Expect(c.panelPresenter.panelOpen, "rename restores logical open state");
             [e drain];
             Expect(e.activationPolicy == NSApplicationActivationPolicyRegular,
                    "rename restores regular lifecycle");
-            [c.lastRenameAlert finish:NSAlertSecondButtonReturn];
-            Expect(c.panelPresenter.panelOpen && w.visible && c.saves == 0,
+            [c.lastEditor cancel:nil];
+            Expect(c.panelPresenter.panelOpen && w.visible && c.saves == 0 && !c.lastEditor.acceptedResult,
                    "cancel keeps the panel open without saving");
             [c windowShouldClose:c.window]; [e drain];
             Expect(!w.visible && !c.panelPresenter.panelOpen && e.hides == hides + 1,
@@ -872,6 +1295,63 @@ int main(void) {
             [e.pending removeAllObjects];
             [e.settling removeAllObjects];
 
+            {
+                YMRenameWindow *cw; YMRenameEnvironment *ce; YMManagedDisplay *cp;
+                YMRenameController *cc = RenameController(&cw, &ce, &cp);
+                NSUInteger profilesBefore = cc.displayProfiles.count;
+                NSUInteger savesBefore = cc.saves;
+                [cc addDisplay:nil];
+                Expect(cc.presentCalls == 1 && cc.lastPresentMode == YMDisplayProfileEditorModeCreate
+                       && cc.lastPresentOrdinal == 0,
+                       "addDisplay presents create mode at ordinal zero");
+                Expect(cc.displayProfiles.count == profilesBefore && cc.saves == savesBefore,
+                       "addDisplay does not allocate a default profile");
+                [cc.lastEditor cancel:nil];
+                [cc.panelPresenter invalidate];
+                [ce.pending removeAllObjects];
+                [ce.settling removeAllObjects];
+            }
+
+            {
+                YMRenameWindow *ew; YMRenameEnvironment *ee; YMManagedDisplay *ep;
+                YMRenameController *ec = RenameController(&ew, &ee, &ep);
+                [ec presentProfileEditorForOrdinal:ep.ordinal mode:YMDisplayProfileEditorModeEdit];
+                Expect(ec.presentCalls == 1 && ec.lastPresentMode == YMDisplayProfileEditorModeEdit
+                       && ec.lastPresentOrdinal == ep.ordinal && ec.editorCreations == 1,
+                       "edit entry presents edit mode with ordinal");
+                [ec.lastEditor cancel:nil];
+                [ec.panelPresenter invalidate];
+                [ee.pending removeAllObjects];
+                [ee.settling removeAllObjects];
+            }
+
+            {
+                YMRenameWindow *mw; YMRenameEnvironment *me; YMManagedDisplay *mp;
+                YMRenameController *mc = RenameController(&mw, &me, &mp);
+                YMFakeStatusItem *status = [YMFakeStatusItem new];
+                NSMenu *menu = [[NSMenu alloc] initWithTitle:@"yomado"];
+                status.menu = menu;
+                mc.statusItem = (NSStatusItem *)(id)status;
+                [mc menuNeedsUpdate:menu];
+                NSMenuItem *addItem = nil;
+                for (NSMenuItem *candidate in menu.itemArray) {
+                    if ([candidate.title isEqualToString:@"添加或启动虚拟屏…"]) { addItem = candidate; break; }
+                }
+                Expect(addItem != nil, "menu bar keeps add-or-start item");
+                Expect(addItem.action == @selector(showWindow:) && addItem.submenu == nil,
+                       "menu bar add-or-start opens the control panel");
+                NSUInteger presentsBefore = mc.presentCalls;
+                NSUInteger profilesBefore = mc.displayProfiles.count;
+                [mc addDisplay:nil];
+                Expect(mc.presentCalls == presentsBefore + 1 && mc.lastPresentMode == YMDisplayProfileEditorModeCreate,
+                       "create still goes through the form entry");
+                Expect(mc.displayProfiles.count == profilesBefore, "menu path never default-creates");
+                [mc.lastEditor cancel:nil];
+                [mc.panelPresenter invalidate];
+                [me.pending removeAllObjects];
+                [me.settling removeAllObjects];
+            }
+
             NSArray<NSString *> *blockedFlags = @[
                 @"previewMode", @"updateWorkspaceBusy", @"appOperationInProgress",
                 @"displayOperationInProgress", @"armed", @"preparing", @"restoring",
@@ -880,12 +1360,12 @@ int main(void) {
             for (NSString *flag in blockedFlags) {
                 YMRenameWindow *bw; YMRenameEnvironment *be; YMManagedDisplay *bp;
                 YMRenameController *bc = RenameController(&bw, &be, &bp);
-                NSUInteger showBefore = bc.showCalls, alertsBefore = bc.alertCreations, savesBefore = bc.saves;
+                NSUInteger showBefore = bc.showCalls, editorsBefore = bc.editorCreations, savesBefore = bc.saves;
                 [bc setValue:@YES forKey:flag];
                 YMRenameMenuItem *blockedItem = [YMRenameMenuItem new];
                 blockedItem.representedObject = bp;
                 [bc renameManagedDisplayFromMenu:(NSMenuItem *)(id)blockedItem];
-                Expect(bc.showCalls == showBefore && bc.alertCreations == alertsBefore && bc.saves == savesBefore,
+                Expect(bc.showCalls == showBefore && bc.editorCreations == editorsBefore && bc.saves == savesBefore,
                        [[NSString stringWithFormat:@"blocked flag %@ rejects rename", flag] UTF8String]);
                 [bc.panelPresenter invalidate];
                 [be.pending removeAllObjects];
@@ -895,48 +1375,60 @@ int main(void) {
             {
                 YMRenameWindow *rw; YMRenameEnvironment *re; YMManagedDisplay *rp;
                 YMRenameController *rc = RenameController(&rw, &re, &rp);
-                NSUInteger showBefore = rc.showCalls, alertsBefore = rc.alertCreations, savesBefore = rc.saves;
+                NSUInteger showBefore = rc.showCalls, editorsBefore = rc.editorCreations, savesBefore = rc.saves;
                 YMRenameMenuItem *nilItem = [YMRenameMenuItem new];
                 nilItem.representedObject = nil;
                 [rc renameManagedDisplayFromMenu:(NSMenuItem *)(id)nilItem];
-                Expect(rc.showCalls == showBefore && rc.alertCreations == alertsBefore && rc.saves == savesBefore,
+                Expect(rc.showCalls == showBefore && rc.editorCreations == editorsBefore && rc.saves == savesBefore,
                        "nil representedObject rejects rename");
                 YMRenameMenuItem *objItem = [YMRenameMenuItem new];
                 objItem.representedObject = [NSObject new];
                 [rc renameManagedDisplayFromMenu:(NSMenuItem *)(id)objItem];
-                Expect(rc.showCalls == showBefore && rc.alertCreations == alertsBefore && rc.saves == savesBefore,
+                Expect(rc.showCalls == showBefore && rc.editorCreations == editorsBefore && rc.saves == savesBefore,
                        "non-profile representedObject rejects rename");
                 YMManagedDisplay *outsider = [YMManagedDisplay new];
                 outsider.friendlyName = @"Outsider";
                 YMRenameMenuItem *outItem = [YMRenameMenuItem new];
                 outItem.representedObject = outsider;
                 [rc renameManagedDisplayFromMenu:(NSMenuItem *)(id)outItem];
-                Expect(rc.showCalls == showBefore && rc.alertCreations == alertsBefore && rc.saves == savesBefore,
+                Expect(rc.showCalls == showBefore && rc.editorCreations == editorsBefore && rc.saves == savesBefore,
                        "profile outside displayProfiles rejects rename");
                 rw.attachedSheet = [NSObject new];
                 YMRenameMenuItem *sheetItem = [YMRenameMenuItem new];
                 sheetItem.representedObject = rp;
                 [rc renameManagedDisplayFromMenu:(NSMenuItem *)(id)sheetItem];
-                Expect(rc.showCalls == showBefore && rc.alertCreations == alertsBefore && rc.saves == savesBefore,
+                Expect(rc.showCalls == showBefore && rc.editorCreations == editorsBefore && rc.saves == savesBefore,
                        "existing attachedSheet rejects second rename");
                 [rc.panelPresenter invalidate];
                 [re.pending removeAllObjects];
                 [re.settling removeAllObjects];
             }
 
-            NSArray<NSDictionary *> *cases = @[
-                @{ @"text": @"Ignored", @"response": @(NSAlertSecondButtonReturn), @"saves": @0, @"name": @"Original" },
-                @{ @"text": @"  Renamed  ", @"response": @(NSAlertFirstButtonReturn), @"saves": @1, @"name": @"Renamed" },
-                @{ @"text": @"x", @"response": @(NSAlertFirstButtonReturn), @"saves": @1, @"name": @"x" },
+            {
+                YMRenameWindow *cw; YMRenameEnvironment *ce; YMManagedDisplay *cp;
+                YMRenameController *cc = RenameController(&cw, &ce, &cp);
+                YMRenameMenuItem *caseItem = [YMRenameMenuItem new];
+                caseItem.representedObject = cp;
+                [cc renameManagedDisplayFromMenu:(NSMenuItem *)(id)caseItem];
+                [ce drain];
+                [cc.lastEditor cancel:nil];
+                Expect(cc.saves == 0 && [cp.friendlyName isEqualToString:@"Original"] && !cc.lastEditor.acceptedResult,
+                       "cancel rename saves nothing");
+                Expect(cc.panelPresenter.panelOpen && cw.visible, "cancel keeps panel open");
+                [cc windowShouldClose:cc.window]; [ce drain];
+                Expect(!cw.visible && !cc.panelPresenter.panelOpen, "close after cancel hides once");
+                [cc.panelPresenter invalidate];
+                [ce.pending removeAllObjects];
+                [ce.settling removeAllObjects];
+            }
+
+            NSArray<NSDictionary *> *validCases = @[
+                @{ @"text": @"  Renamed  ", @"name": @"Renamed" },
+                @{ @"text": @"x", @"name": @"x" },
                 @{ @"text": [@"" stringByPaddingToLength:60 withString:@"x" startingAtIndex:0],
-                   @"response": @(NSAlertFirstButtonReturn), @"saves": @1,
-                   @"name": [@"" stringByPaddingToLength:60 withString:@"x" startingAtIndex:0] },
-                @{ @"text": @"   ", @"response": @(NSAlertFirstButtonReturn), @"saves": @0, @"name": @"Original" },
-                @{ @"text": @"A\nB", @"response": @(NSAlertFirstButtonReturn), @"saves": @0, @"name": @"Original" },
-                @{ @"text": [@"" stringByPaddingToLength:61 withString:@"x" startingAtIndex:0],
-                   @"response": @(NSAlertFirstButtonReturn), @"saves": @0, @"name": @"Original" }
+                   @"name": [@"" stringByPaddingToLength:60 withString:@"x" startingAtIndex:0] }
             ];
-            for (NSDictionary *caseInfo in cases) {
+            for (NSDictionary *caseInfo in validCases) {
                 YMRenameWindow *cw; YMRenameEnvironment *ce; YMManagedDisplay *cp;
                 YMRenameController *cc = RenameController(&cw, &ce, &cp);
                 NSUInteger inventoryBefore = cc.inventoryUpdates;
@@ -945,21 +1437,39 @@ int main(void) {
                 caseItem.representedObject = cp;
                 [cc renameManagedDisplayFromMenu:(NSMenuItem *)(id)caseItem];
                 [ce drain];
-                cc.lastRenameAlert.accessoryView.stringValue = caseInfo[@"text"];
-                [cc.lastRenameAlert finish:[caseInfo[@"response"] integerValue]];
-                NSUInteger expectedSaves = [caseInfo[@"saves"] unsignedIntegerValue];
-                Expect(cc.saves == expectedSaves && [cp.friendlyName isEqualToString:caseInfo[@"name"]],
-                       [[NSString stringWithFormat:@"rename case %@ saves and name", caseInfo[@"name"]] UTF8String]);
-                if (expectedSaves == 1) {
-                    Expect(cc.inventoryUpdates == inventoryBefore + 1, "valid save updates inventory once");
-                } else {
-                    Expect(cc.inventoryUpdates == inventoryBefore, "non-save leaves inventory unchanged");
-                }
+                [cc.lastEditor submitName:caseInfo[@"text"]];
+                Expect(cc.saves == 1 && [cp.friendlyName isEqualToString:caseInfo[@"name"]]
+                       && cc.lastEditor.finished && cc.lastEditor.acceptedResult,
+                       [[NSString stringWithFormat:@"valid rename %@ saves once", caseInfo[@"name"]] UTF8String]);
+                Expect(cc.inventoryUpdates == inventoryBefore + 1, "valid save updates inventory once");
                 Expect(cc.panelPresenter.panelOpen && cw.visible && ce.hides == hidesBefore,
                        "rename completion keeps panel open without hiding");
                 [cc windowShouldClose:cc.window]; [ce drain];
                 Expect(!cw.visible && !cc.panelPresenter.panelOpen && ce.hides == hidesBefore + 1,
-                       "explicit close after rename case hides once");
+                       "explicit close after valid rename hides once");
+                [cc.panelPresenter invalidate];
+                [ce.pending removeAllObjects];
+                [ce.settling removeAllObjects];
+            }
+
+            NSArray<NSString *> *invalidNames = @[
+                @"   ", @"A\nB", [@"" stringByPaddingToLength:61 withString:@"x" startingAtIndex:0]
+            ];
+            for (NSString *invalidName in invalidNames) {
+                YMRenameWindow *cw; YMRenameEnvironment *ce; YMManagedDisplay *cp;
+                YMRenameController *cc = RenameController(&cw, &ce, &cp);
+                NSUInteger inventoryBefore = cc.inventoryUpdates;
+                YMRenameMenuItem *caseItem = [YMRenameMenuItem new];
+                caseItem.representedObject = cp;
+                [cc renameManagedDisplayFromMenu:(NSMenuItem *)(id)caseItem];
+                [ce drain];
+                [cc.lastEditor submitName:invalidName];
+                Expect(!cc.lastEditor.finished && cc.lastEditor.lastError != nil && cc.saves == 0
+                       && [cp.friendlyName isEqualToString:@"Original"],
+                       "invalid rename keeps editor open with error");
+                Expect(cc.inventoryUpdates == inventoryBefore, "invalid rename leaves inventory unchanged");
+                [cc.lastEditor cancel:nil];
+                [cc windowShouldClose:cc.window]; [ce drain];
                 [cc.panelPresenter invalidate];
                 [ce.pending removeAllObjects];
                 [ce.settling removeAllObjects];
@@ -970,6 +1480,8 @@ int main(void) {
                 YMRenameController *ic = RenameController(&iw, &ie, &ip);
                 YMManagedDisplay *selected = [YMManagedDisplay new];
                 selected.friendlyName = @"Selected";
+                selected.ordinal = 2;
+                selected.width = 1920; selected.height = 1080;
                 YMFakeDisplay *selectedDisplay = [YMFakeDisplay new];
                 selected.display = selectedDisplay;
                 [ic.displayProfiles addObject:selected];
@@ -979,8 +1491,7 @@ int main(void) {
                 targetItem.representedObject = ip;
                 [ic renameManagedDisplayFromMenu:(NSMenuItem *)(id)targetItem];
                 [ie drain];
-                ic.lastRenameAlert.accessoryView.stringValue = @"MenuTarget";
-                [ic.lastRenameAlert finish:NSAlertFirstButtonReturn];
+                [ic.lastEditor submitName:@"MenuTarget"];
                 Expect([ip.friendlyName isEqual:@"MenuTarget"] && [selected.friendlyName isEqual:@"Selected"],
                        "valid save renames only the menu target");
                 Expect(ic.selectedProfile == selected && ic.virtualDisplay == selectedDisplay,
@@ -998,12 +1509,13 @@ int main(void) {
                 [ic renameManagedDisplayFromMenu:(NSMenuItem *)(id)targetItem];
                 [ie drain];
                 [ic.displayProfiles removeObject:ip];
-                ic.lastRenameAlert.accessoryView.stringValue = @"Gone";
-                [ic.lastRenameAlert finish:NSAlertFirstButtonReturn];
-                Expect(ic.saves == 0 && [ip.friendlyName isEqual:@"Original"] && ic.panelPresenter.panelOpen,
-                       "removed target at finish does not save");
+                [ic.lastEditor submitName:@"Gone"];
+                Expect(!ic.lastEditor.finished && ic.lastEditor.lastError != nil
+                       && ic.saves == 0 && [ip.friendlyName isEqual:@"Original"] && ic.panelPresenter.panelOpen,
+                       "removed target at submit keeps editor open without saving");
+                [ic.lastEditor cancel:nil];
                 [ic windowShouldClose:ic.window]; [ie drain];
-                Expect(!iw.visible && !ic.panelPresenter.panelOpen, "panel still closes after removed-target finish");
+                Expect(!iw.visible && !ic.panelPresenter.panelOpen, "panel still closes after removed-target cancel");
                 [ic.panelPresenter invalidate];
                 [ie.pending removeAllObjects];
                 [ie.settling removeAllObjects];
@@ -1016,13 +1528,14 @@ int main(void) {
                 [ic renameManagedDisplayFromMenu:(NSMenuItem *)(id)targetItem];
                 [ie drain];
                 ic.updateWorkspaceBusy = YES;
-                ic.lastRenameAlert.accessoryView.stringValue = @"Busy";
-                [ic.lastRenameAlert finish:NSAlertFirstButtonReturn];
-                Expect(ic.saves == 0 && [ip.friendlyName isEqual:@"Original"] && ic.panelPresenter.panelOpen,
-                       "busy at finish does not save");
+                [ic.lastEditor submitName:@"Busy"];
+                Expect(!ic.lastEditor.finished && ic.lastEditor.lastError != nil
+                       && ic.saves == 0 && [ip.friendlyName isEqual:@"Original"] && ic.panelPresenter.panelOpen,
+                       "busy at submit keeps editor open without saving");
                 ic.updateWorkspaceBusy = NO;
+                [ic.lastEditor cancel:nil];
                 [ic windowShouldClose:ic.window]; [ie drain];
-                Expect(!iw.visible && !ic.panelPresenter.panelOpen, "panel still closes after busy finish");
+                Expect(!iw.visible && !ic.panelPresenter.panelOpen, "panel still closes after busy cancel");
                 [ic.panelPresenter invalidate];
                 [ie.pending removeAllObjects];
                 [ie.settling removeAllObjects];
@@ -1040,7 +1553,7 @@ int main(void) {
                 [sc windowShouldClose:sc.window];
                 Expect(sw.attachedSheet == sheet && se.hides == hidesBefore && sc.panelPresenter.panelOpen,
                        "sheet protects against close");
-                [sc.lastRenameAlert finish:NSAlertSecondButtonReturn];
+                [sc.lastEditor cancel:nil];
                 [sc windowShouldClose:sc.window]; [se drain];
                 Expect(!sw.visible && !sc.panelPresenter.panelOpen && se.hides == hidesBefore + 1,
                        "close works after sheet cancel");
@@ -1056,7 +1569,7 @@ int main(void) {
                 dupItem.representedObject = dp;
                 [dc renameManagedDisplayFromMenu:(NSMenuItem *)(id)dupItem];
                 [de drain];
-                [dc.lastRenameAlert finish:NSAlertSecondButtonReturn];
+                [dc.lastEditor cancel:nil];
                 NSUInteger hidesBefore = de.hides;
                 [dc windowShouldClose:dc.window];
                 [dc windowShouldClose:dc.window];
@@ -1083,7 +1596,7 @@ int main(void) {
                 Expect(oc.panelPresenter.panelOpen && ow.visible
                        && oe.activationPolicy == NSApplicationActivationPolicyRegular,
                        "stale ordinary close cannot demote after rename open");
-                [oc.lastRenameAlert finish:NSAlertSecondButtonReturn];
+                [oc.lastEditor cancel:nil];
                 [oc.panelPresenter invalidate];
                 [oe.pending removeAllObjects];
                 [oe.settling removeAllObjects];
@@ -1107,7 +1620,7 @@ int main(void) {
                        "stale settling retry adds no policy request after rename");
                 Expect(re.activationPolicy == NSApplicationActivationPolicyRegular,
                        "rename wins over stale Accessory retry");
-                [rc.lastRenameAlert finish:NSAlertSecondButtonReturn];
+                [rc.lastEditor cancel:nil];
                 [rc.panelPresenter invalidate];
                 [re.pending removeAllObjects];
                 [re.settling removeAllObjects];
@@ -1124,15 +1637,14 @@ int main(void) {
                 sideItem.representedObject = np;
                 [nc renameManagedDisplayFromMenu:(NSMenuItem *)(id)sideItem];
                 [ne drain];
-                [nc.lastRenameAlert finish:NSAlertSecondButtonReturn];
+                [nc.lastEditor cancel:nil];
                 [nc windowShouldClose:nc.window]; [ne drain];
                 [nc showWindow:nil]; [ne drain];
                 sideItem = [YMRenameMenuItem new];
                 sideItem.representedObject = np;
                 [nc renameManagedDisplayFromMenu:(NSMenuItem *)(id)sideItem];
                 [ne drain];
-                nc.lastRenameAlert.accessoryView.stringValue = @"SideEffect";
-                [nc.lastRenameAlert finish:NSAlertFirstButtonReturn];
+                [nc.lastEditor submitName:@"SideEffect"];
                 [nc windowShouldClose:nc.window]; [ne drain];
                 [nc showWindow:nil]; [ne drain];
                 Expect(heartbeat.invalidations == 0 && display.creates == 0 && display.destroys == 0
@@ -1152,13 +1664,12 @@ int main(void) {
                 alreadyItem.representedObject = ap;
                 [ac renameManagedDisplayFromMenu:(NSMenuItem *)(id)alreadyItem];
                 [ae drain];
-                [ac.lastRenameAlert finish:NSAlertSecondButtonReturn];
+                [ac.lastEditor cancel:nil];
                 Expect(ac.panelPresenter.panelOpen && aw.visible && ac.saves == 0,
                        "already-open cancel keeps panel open");
                 [ac renameManagedDisplayFromMenu:(NSMenuItem *)(id)alreadyItem];
                 [ae drain];
-                ac.lastRenameAlert.accessoryView.stringValue = @"AlreadyOpen";
-                [ac.lastRenameAlert finish:NSAlertFirstButtonReturn];
+                [ac.lastEditor submitName:@"AlreadyOpen"];
                 Expect(ac.saves == 1 && [ap.friendlyName isEqual:@"AlreadyOpen"]
                        && ac.panelPresenter.panelOpen && aw.visible && ac.window == windowIdentity,
                        "already-open save keeps same panel identity");
@@ -1171,8 +1682,769 @@ int main(void) {
                 [ae.pending removeAllObjects];
                 [ae.settling removeAllObjects];
             }
+
+            {
+                YMRenameWindow *fw; YMRenameEnvironment *fe; YMManagedDisplay *fp;
+                YMRenameController *fc = RenameController(&fw, &fe, &fp);
+                YMFocusControl *addButton = [YMFocusControl new];
+                addButton.window = fw;
+                addButton.enabled = YES;
+                addButton.acceptsFirstResponder = YES;
+                fc.addDisplayButton = (NSButton *)(id)addButton;
+                fw.firstResponder = addButton;
+                [fc addDisplay:nil];
+                Expect(fc.profileEditor != nil && fc.editorCreations == 1, "focus fixture opens create editor");
+                addButton.enabled = NO;
+                [fc.lastEditor cancel:nil];
+                Expect(addButton.enabled, "cancel refreshes create button from latest permission");
+                Expect(fw.firstResponder == addButton, "cancel restores focus to create button");
+                Expect(fc.profileEditor == nil, "cancel clears current editor");
+                [fc.panelPresenter invalidate];
+                [fe.pending removeAllObjects];
+                [fe.settling removeAllObjects];
+            }
+
+            {
+                YMRenameWindow *ow; YMRenameEnvironment *oe; YMManagedDisplay *op;
+                YMRenameController *oc = RenameController(&ow, &oe, &op);
+                YMFocusControl *origin = [YMFocusControl new];
+                origin.window = ow;
+                origin.enabled = YES;
+                origin.acceptsFirstResponder = YES;
+                YMFocusControl *addButton = [YMFocusControl new];
+                addButton.window = ow;
+                addButton.enabled = YES;
+                addButton.acceptsFirstResponder = YES;
+                oc.addDisplayButton = (NSButton *)(id)addButton;
+                [oc addDisplay:nil];
+                oc.profileEditorOrigin = (NSView *)(id)origin;
+                addButton.enabled = NO;
+                [oc.lastEditor cancel:nil];
+                Expect(ow.firstResponder == origin, "cancel restores an enabled origin control");
+                Expect(addButton.enabled, "cancel still refreshes create button when origin wins");
+                [oc.panelPresenter invalidate];
+                [oe.pending removeAllObjects];
+                [oe.settling removeAllObjects];
+            }
+
+            {
+                YMRenameWindow *rw; YMRenameEnvironment *re; YMManagedDisplay *rp;
+                YMRenameController *rc = RenameController(&rw, &re, &rp);
+                YMFocusControl *origin = [YMFocusControl new];
+                origin.window = rw;
+                origin.enabled = YES;
+                origin.acceptsFirstResponder = YES;
+                YMFocusControl *addButton = [YMFocusControl new];
+                addButton.window = rw;
+                addButton.enabled = YES;
+                addButton.acceptsFirstResponder = YES;
+                rc.addDisplayButton = (NSButton *)(id)addButton;
+                [rc presentProfileEditorForOrdinal:rp.ordinal mode:YMDisplayProfileEditorModeEdit];
+                rc.profileEditorOrigin = (NSView *)(id)origin;
+                origin.enabled = NO;
+                addButton.enabled = NO;
+                [rc.lastEditor cancel:nil];
+                Expect(origin.enabled, "cancel refreshes stale saved-row origin before restore");
+                Expect(rw.firstResponder == origin, "cancel restores focus to refreshed saved-row origin");
+                Expect(addButton.enabled, "cancel still refreshes create button after origin refresh");
+                [rc.panelPresenter invalidate];
+                [re.pending removeAllObjects];
+                [re.settling removeAllObjects];
+            }
+
+            {
+                YMRenameWindow *sw; YMRenameEnvironment *se; YMManagedDisplay *sp;
+                YMRenameController *sc = RenameController(&sw, &se, &sp);
+                YMFocusControl *origin = [YMFocusControl new];
+                origin.window = sw;
+                origin.enabled = YES;
+                origin.acceptsFirstResponder = YES;
+                YMFocusControl *addButton = [YMFocusControl new];
+                addButton.window = sw;
+                addButton.enabled = YES;
+                addButton.acceptsFirstResponder = YES;
+                sc.addDisplayButton = (NSButton *)(id)addButton;
+                [sc presentProfileEditorForOrdinal:sp.ordinal mode:YMDisplayProfileEditorModeEdit];
+                sc.profileEditorOrigin = (NSView *)(id)origin;
+                origin.enabled = NO;
+                addButton.enabled = NO;
+                [sc.lastEditor submitName:@"SavedFocus"];
+                Expect([sp.friendlyName isEqualToString:@"SavedFocus"] && sc.saves == 1,
+                       "valid save commits before focus restore");
+                Expect(origin.enabled, "valid save refreshes stale saved-row origin before restore");
+                Expect(sw.firstResponder == origin, "valid save restores focus to refreshed saved-row origin");
+                [sc.panelPresenter invalidate];
+                [se.pending removeAllObjects];
+                [se.settling removeAllObjects];
+            }
+
+            {
+                YMRenameWindow *dw; YMRenameEnvironment *de; YMManagedDisplay *dp;
+                YMRenameController *dc = RenameController(&dw, &de, &dp);
+                YMFocusControl *origin = [YMFocusControl new];
+                origin.window = dw;
+                origin.enabled = YES;
+                origin.acceptsFirstResponder = YES;
+                YMFocusControl *addButton = [YMFocusControl new];
+                addButton.window = dw;
+                addButton.enabled = YES;
+                addButton.acceptsFirstResponder = YES;
+                dc.addDisplayButton = (NSButton *)(id)addButton;
+                [dc presentProfileEditorForOrdinal:dp.ordinal mode:YMDisplayProfileEditorModeEdit];
+                dc.profileEditorOrigin = (NSView *)(id)origin;
+                origin.enabled = NO;
+                addButton.enabled = NO;
+                void (^endWhileAttached)(BOOL) = [dc.lastEditor.endHandler copy];
+                dc.lastEditor.finished = YES;
+                dc.lastEditor.endHandler = nil;
+                dc.lastEditor.submitHandler = nil;
+                endWhileAttached(NO);
+                Expect(dw.attachedSheet != nil, "delayed-detach saved origin keeps attachedSheet");
+                Expect(!origin.enabled, "origin stays stale while sheet still attached");
+                dw.attachedSheet = nil;
+                [dc restoreProfileEditorFocus];
+                Expect(origin.enabled, "delayed detach refreshes saved-row origin once");
+                Expect(dw.firstResponder == origin, "delayed detach restores refreshed saved-row origin");
+                [dc.panelPresenter invalidate];
+                [de.pending removeAllObjects];
+                [de.settling removeAllObjects];
+            }
+
+            {
+                YMRenameWindow *pw; YMRenameEnvironment *pe; YMManagedDisplay *pp;
+                YMRenameController *pc = RenameController(&pw, &pe, &pp);
+                YMFocusControl *origin = [YMFocusControl new];
+                origin.window = pw;
+                origin.enabled = YES;
+                origin.acceptsFirstResponder = YES;
+                YMFocusControl *addButton = [YMFocusControl new];
+                addButton.window = pw;
+                addButton.enabled = YES;
+                addButton.acceptsFirstResponder = YES;
+                pc.addDisplayButton = (NSButton *)(id)addButton;
+                [pc presentProfileEditorForOrdinal:pp.ordinal mode:YMDisplayProfileEditorModeEdit];
+                pc.profileEditorOrigin = (NSView *)(id)origin;
+                origin.enabled = NO;
+                addButton.enabled = NO;
+                void (^endWhileAttached)(BOOL) = [pc.lastEditor.endHandler copy];
+                pc.lastEditor.finished = YES;
+                pc.lastEditor.endHandler = nil;
+                pc.lastEditor.submitHandler = nil;
+                NSUInteger restoresBeforeEnd = pc.restoreFocusCalls;
+                endWhileAttached(NO);
+                Expect(pw.attachedSheet != nil && pc.profileEditorFocusPending,
+                       "early async fixture keeps sheet and pending restore");
+                Expect(pc.restoreFocusCalls == restoresBeforeEnd + 1,
+                       "endHandler schedules exactly one restore attempt");
+                // Drain while Sheet stays attached: must stay bounded, not busy-spin.
+                for (NSUInteger pass = 0; pass < 40 && pw.attachedSheet != nil; pass++) {
+                    [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+                }
+                Expect(pw.attachedSheet != nil && pc.profileEditorFocusPending && !origin.enabled,
+                       "early async restore leaves origin gated while sheet remains");
+                Expect(pc.restoreFocusCalls <= restoresBeforeEnd + 2,
+                       "attachedSheet restore stays bounded to one async retry");
+                NSUInteger restoresWhileAttached = pc.restoreFocusCalls;
+                for (NSUInteger pass = 0; pass < 20; pass++) {
+                    [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+                }
+                Expect(pc.restoreFocusCalls == restoresWhileAttached,
+                       "no further self-reschedule while attachedSheet remains");
+                pw.attachedSheet = nil;
+                pc.inventoryDrivesPendingRestore = YES;
+                [pc updateInventory];
+                Expect(origin.enabled, "inventory handoff refreshes origin after delayed detach");
+                Expect(pw.firstResponder == origin, "inventory handoff focuses refreshed origin");
+                Expect(!pc.profileEditorFocusPending, "inventory handoff clears pending flag");
+                [pc.panelPresenter invalidate];
+                [pe.pending removeAllObjects];
+                [pe.settling removeAllObjects];
+            }
+
+            {
+                YMRenameWindow *gw; YMRenameEnvironment *ge; YMManagedDisplay *gp;
+                YMRenameController *gc = RenameController(&gw, &ge, &gp);
+                YMFocusControl *origin = [YMFocusControl new];
+                origin.window = gw;
+                origin.enabled = YES;
+                origin.acceptsFirstResponder = YES;
+                YMFocusControl *addButton = [YMFocusControl new];
+                addButton.window = gw;
+                addButton.enabled = YES;
+                addButton.acceptsFirstResponder = YES;
+                gc.addDisplayButton = (NSButton *)(id)addButton;
+                [gc presentProfileEditorForOrdinal:gp.ordinal mode:YMDisplayProfileEditorModeEdit];
+                gc.profileEditorOrigin = (NSView *)(id)origin;
+                origin.enabled = NO;
+                addButton.enabled = NO;
+                origin.window = nil;
+                [gc.lastEditor cancel:nil];
+                Expect(gw.firstResponder == addButton, "missing saved-row origin falls back to create");
+                Expect(addButton.enabled, "fallback create button is refreshed");
+                [gc.panelPresenter invalidate];
+                [ge.pending removeAllObjects];
+                [ge.settling removeAllObjects];
+            }
+
+            {
+                YMRenameWindow *bw; YMRenameEnvironment *be; YMManagedDisplay *bp;
+                YMRenameController *bc = RenameController(&bw, &be, &bp);
+                YMFocusControl *origin = [YMFocusControl new];
+                origin.window = bw;
+                origin.enabled = YES;
+                origin.acceptsFirstResponder = YES;
+                YMFocusControl *addButton = [YMFocusControl new];
+                addButton.window = bw;
+                addButton.enabled = YES;
+                addButton.acceptsFirstResponder = YES;
+                bc.addDisplayButton = (NSButton *)(id)addButton;
+                [bc presentProfileEditorForOrdinal:bp.ordinal mode:YMDisplayProfileEditorModeEdit];
+                bc.profileEditorOrigin = (NSView *)(id)origin;
+                origin.enabled = NO;
+                addButton.enabled = NO;
+                bc.updateWorkspaceBusy = YES;
+                [bc.lastEditor cancel:nil];
+                Expect(!origin.enabled, "busy keeps refreshed origin disabled");
+                Expect(!addButton.enabled, "busy keeps create button disabled");
+                Expect(bw.firstResponder == nil, "busy falls back safely when no control is enabled");
+                [bc.panelPresenter invalidate];
+                [be.pending removeAllObjects];
+                [be.settling removeAllObjects];
+            }
+
+            {
+                YMRenameWindow *dw; YMRenameEnvironment *de; YMManagedDisplay *dp;
+                YMRenameController *dc = RenameController(&dw, &de, &dp);
+                YMFocusControl *addButton = [YMFocusControl new];
+                addButton.window = dw;
+                addButton.enabled = YES;
+                addButton.acceptsFirstResponder = YES;
+                dc.addDisplayButton = (NSButton *)(id)addButton;
+                [dc addDisplay:nil];
+                addButton.enabled = NO;
+                dc.topologyRecoverySnapshot = [YMDisplayTopologySnapshot new];
+                [dc.lastEditor cancel:nil];
+                Expect(!addButton.enabled, "recovery keeps create button disabled after cancel");
+                Expect(dw.firstResponder == nil, "cancel yields window when no control is enabled");
+                Expect(dc.profileEditor == nil, "cancel still clears editor under recovery");
+                [dc.panelPresenter invalidate];
+                [de.pending removeAllObjects];
+                [de.settling removeAllObjects];
+            }
+
+            {
+                YMRenameWindow *sw; YMRenameEnvironment *se; YMManagedDisplay *sp;
+                YMRenameController *sc = RenameController(&sw, &se, &sp);
+                [sc addDisplay:nil];
+                YMRenameEditorStandIn *first = sc.lastEditor;
+                void (^staleEnd)(BOOL) = [first.endHandler copy];
+                Expect(staleEnd != nil, "open editor exposes endHandler");
+                YMRenameEditorStandIn *second = [YMRenameEditorStandIn new];
+                second.mode = YMDisplayProfileEditorModeCreate;
+                sc.profileEditor = (YMDisplayProfileEditor *)(id)second;
+                staleEnd(NO);
+                Expect(sc.profileEditor == (YMDisplayProfileEditor *)(id)second,
+                       "stale endHandler does not clear a newer editor");
+                sw.attachedSheet = second.window;
+                NSUInteger presentsBefore = sc.presentCalls;
+                NSUInteger editorsBefore = sc.editorCreations;
+                [sc presentProfileEditorForOrdinal:0 mode:YMDisplayProfileEditorModeCreate];
+                Expect(sc.presentCalls == presentsBefore + 1 && sc.editorCreations == editorsBefore
+                       && sc.profileEditor == (YMDisplayProfileEditor *)(id)second,
+                       "second present is rejected while attachedSheet remains");
+                [sc.panelPresenter invalidate];
+                [se.pending removeAllObjects];
+                [se.settling removeAllObjects];
+            }
+
+            {
+                YMRenameWindow *lw; YMRenameEnvironment *le; YMManagedDisplay *lp;
+                YMRenameController *lc = RenameController(&lw, &le, &lp);
+                YMFocusControl *addButton = [YMFocusControl new];
+                addButton.window = lw;
+                addButton.enabled = YES;
+                addButton.acceptsFirstResponder = YES;
+                lc.addDisplayButton = (NSButton *)(id)addButton;
+                lw.firstResponder = addButton;
+                [lc addDisplay:nil];
+                Expect(lc.profileEditor != nil && lw.attachedSheet != nil,
+                       "delayed-detach fixture opens create sheet");
+                addButton.enabled = NO;
+                void (^endWhileAttached)(BOOL) = [lc.lastEditor.endHandler copy];
+                Expect(endWhileAttached != nil, "delayed-detach fixture exposes endHandler");
+                lc.lastEditor.finished = YES;
+                lc.lastEditor.endHandler = nil;
+                lc.lastEditor.submitHandler = nil;
+                endWhileAttached(NO);
+                Expect(lc.profileEditor == nil, "endHandler clears editor while sheet still attached");
+                Expect(lw.attachedSheet != nil, "endHandler leaves attachedSheet for later detach");
+                Expect(lc.profileEditorOrigin != nil, "origin is kept until sheet detaches");
+                Expect(!addButton.enabled, "create button stays gated by attachedSheet");
+                lw.attachedSheet = nil;
+                [lc restoreProfileEditorFocus];
+                Expect(addButton.enabled, "delayed detach refreshes create button once");
+                Expect(lw.firstResponder == addButton, "focus restores once after delayed detach");
+                Expect(lc.profileEditorOrigin == nil, "origin clears after successful delayed restore");
+                id responderAfterRestore = lw.firstResponder;
+                [lc restoreProfileEditorFocus];
+                Expect(lw.firstResponder == responderAfterRestore,
+                       "extra restore after success does not reshuffle focus");
+                [lc.panelPresenter invalidate];
+                [le.pending removeAllObjects];
+                [le.settling removeAllObjects];
+            }
+
+            {
+                YMRenameWindow *nw; YMRenameEnvironment *ne; YMManagedDisplay *np;
+                YMRenameController *nc = RenameController(&nw, &ne, &np);
+                YMFocusControl *addButton = [YMFocusControl new];
+                addButton.window = nw;
+                addButton.enabled = YES;
+                addButton.acceptsFirstResponder = YES;
+                nc.addDisplayButton = (NSButton *)(id)addButton;
+                nw.firstResponder = addButton;
+                [nc addDisplay:nil];
+                addButton.enabled = NO;
+                void (^endWhileAttached)(BOOL) = [nc.lastEditor.endHandler copy];
+                nc.lastEditor.finished = YES;
+                nc.lastEditor.endHandler = nil;
+                nc.lastEditor.submitHandler = nil;
+                endWhileAttached(NO);
+                Expect(nc.profileEditorOrigin != nil, "pending restore keeps origin before new editor");
+                YMRenameEditorStandIn *newer = [YMRenameEditorStandIn new];
+                newer.mode = YMDisplayProfileEditorModeCreate;
+                nc.profileEditor = (YMDisplayProfileEditor *)(id)newer;
+                nw.attachedSheet = nil;
+                id responderBefore = nw.firstResponder;
+                [nc restoreProfileEditorFocus];
+                Expect(nc.profileEditor == (YMDisplayProfileEditor *)(id)newer,
+                       "pending restore does not clear a newer editor");
+                Expect(nw.firstResponder == responderBefore,
+                       "pending restore does not steal focus for a newer editor");
+                [nc.panelPresenter invalidate];
+                [ne.pending removeAllObjects];
+                [ne.settling removeAllObjects];
+            }
+
+            {
+                YMRenameWindow *uw; YMRenameEnvironment *ue; YMManagedDisplay *up;
+                YMRenameController *uc = RenameController(&uw, &ue, &up);
+                YMFocusControl *addButton = [YMFocusControl new];
+                addButton.window = uw;
+                addButton.enabled = YES;
+                addButton.acceptsFirstResponder = YES;
+                uc.addDisplayButton = (NSButton *)(id)addButton;
+                uw.firstResponder = addButton;
+                [uc addDisplay:nil];
+                addButton.enabled = NO;
+                void (^endWhileAttached)(BOOL) = [uc.lastEditor.endHandler copy];
+                uc.lastEditor.finished = YES;
+                uc.lastEditor.endHandler = nil;
+                uc.lastEditor.submitHandler = nil;
+                endWhileAttached(NO);
+                uw.attachedSheet = nil;
+                YMFocusControl *userChosen = [YMFocusControl new];
+                userChosen.window = uw;
+                userChosen.enabled = YES;
+                userChosen.acceptsFirstResponder = YES;
+                uw.firstResponder = userChosen;
+                [uc restoreProfileEditorFocus];
+                Expect(uw.firstResponder == userChosen, "pending restore does not steal user focus");
+                Expect(uc.profileEditorOrigin == nil, "abandoned pending restore clears origin");
+                [uc.panelPresenter invalidate];
+                [ue.pending removeAllObjects];
+                [ue.settling removeAllObjects];
+            }
         }
     rename_tests_done:
+
+        // Display profile accept/start gates and lifecycle projection.
+        {
+            YMFakeTopology *topology; YMFakeDisplay *display; YMManagedDisplay *profile, *sibling;
+            YMFakeController *controller = Controller(&topology, &display, &profile, &sibling);
+            profile.width = 1920; profile.height = 1080;
+            sibling.ordinal = 1;
+            YMHeadlessProfileEditor *marker = [YMHeadlessProfileEditor new];
+            controller.profileEditor = (YMDisplayProfileEditor *)(id)marker;
+            YMDisplayProfileDraft *draft = [[YMDisplayProfileDraft alloc] initWithName:@" Changed " width:2560 hiDPI:YES];
+            NSError *error = nil;
+            controller.selectedProfile = sibling;
+            BOOL accepted = [controller acceptProfileDraft:draft mode:YMDisplayProfileEditorModeEdit
+                ordinal:profile.ordinal editor:(YMDisplayProfileEditor *)(id)marker error:&error];
+            Expect(accepted && [profile.friendlyName isEqualToString:@"Changed"], "stable ordinal selects edited profile");
+            Expect(profile.width == 2560 && profile.height == 1440 && profile.hiDPI, "all edited fields commit together");
+            Expect(display.creates == 0 && controller.saves == 1, "edit saves once without start");
+            Expect(![sibling.friendlyName isEqualToString:@"Changed"], "selected sibling remains untouched");
+            Expect(NSApp == nil, "profile requests stay headless");
+        }
+
+        {
+            YMFakeTopology *topology; YMFakeDisplay *display; YMManagedDisplay *profile, *sibling;
+            YMFakeController *controller = Controller(&topology, &display, &profile, &sibling);
+            profile.width = 1920; profile.height = 1080; profile.friendlyName = @"Target";
+            sibling.ordinal = 1;
+            YMHeadlessProfileEditor *marker = [YMHeadlessProfileEditor new];
+            controller.profileEditor = (YMDisplayProfileEditor *)(id)marker;
+            NSUInteger baselineProfiles = controller.displayProfiles.count;
+            NSUInteger baselineSaves = controller.saves;
+            NSUInteger baselineCreates = display.creates;
+            YMHeadlessProfileWindow *gateWindow = [YMHeadlessProfileWindow new];
+            controller.window = (NSWindow *)(id)gateWindow;
+            void (^expectRejected)(NSString *, void (^)(void)) = ^(NSString *name, void (^mutate)(void)) {
+                mutate();
+                NSError *error = nil;
+                YMDisplayProfileDraft *draft = [[YMDisplayProfileDraft alloc] initWithName:@"Blocked" width:1920 hiDPI:NO];
+                BOOL accepted = [controller acceptProfileDraft:draft mode:YMDisplayProfileEditorModeEdit
+                    ordinal:profile.ordinal editor:(YMDisplayProfileEditor *)(id)marker error:&error];
+                Expect(!accepted && error != nil, name.UTF8String);
+                Expect(controller.displayProfiles.count == baselineProfiles
+                       && controller.saves == baselineSaves && display.creates == baselineCreates
+                       && [profile.friendlyName isEqualToString:@"Target"],
+                       [[name stringByAppendingString:@" leaves model untouched"] UTF8String]);
+                controller.previewMode = NO;
+                controller.updateWorkspaceBusy = NO;
+                controller.appOperationInProgress = NO;
+                controller.displayOperationInProgress = NO;
+                controller.armed = NO;
+                controller.preparing = NO;
+                controller.restoring = NO;
+                controller.layoutChangedForTrial = NO;
+                controller.recoveryRequested = NO;
+                controller.topologyRecoverySnapshot = nil;
+                gateWindow.attachedSheet = nil;
+                marker.window = nil;
+                controller.window = (NSWindow *)(id)gateWindow;
+            };
+            expectRejected(@"previewMode rejects profile commit", ^{ controller.previewMode = YES; });
+            expectRejected(@"updateWorkspaceBusy rejects profile commit", ^{ controller.updateWorkspaceBusy = YES; });
+            expectRejected(@"appOperationInProgress rejects profile commit", ^{ controller.appOperationInProgress = YES; });
+            expectRejected(@"displayOperationInProgress rejects profile commit", ^{ controller.displayOperationInProgress = YES; });
+            expectRejected(@"armed rejects profile commit", ^{ controller.armed = YES; });
+            expectRejected(@"preparing rejects profile commit", ^{ controller.preparing = YES; });
+            expectRejected(@"restoring rejects profile commit", ^{ controller.restoring = YES; });
+            expectRejected(@"layoutChangedForTrial rejects profile commit", ^{ controller.layoutChangedForTrial = YES; });
+            expectRejected(@"recoveryRequested rejects profile commit", ^{ controller.recoveryRequested = YES; });
+            expectRejected(@"topologyRecoverySnapshot rejects profile commit", ^{
+                controller.topologyRecoverySnapshot = topology.snapshot;
+            });
+            expectRejected(@"foreign attachedSheet rejects profile commit", ^{
+                gateWindow.attachedSheet = [NSObject new];
+                marker.window = [NSObject new];
+            });
+
+            YMHeadlessProfileEditor *stale = [YMHeadlessProfileEditor new];
+            NSError *staleError = nil;
+            Expect(![controller acceptProfileDraft:[[YMDisplayProfileDraft alloc] initWithName:@"Stale" width:1920 hiDPI:NO]
+                mode:YMDisplayProfileEditorModeEdit ordinal:profile.ordinal
+                editor:(YMDisplayProfileEditor *)(id)stale error:&staleError]
+                   && controller.saves == baselineSaves, "stale editor identity is rejected");
+
+            NSMutableArray *kept = [NSMutableArray arrayWithObject:sibling];
+            controller.displayProfiles = kept;
+            Expect(![controller acceptProfileDraft:[[YMDisplayProfileDraft alloc] initWithName:@"Gone" width:1920 hiDPI:NO]
+                mode:YMDisplayProfileEditorModeEdit ordinal:profile.ordinal
+                editor:(YMDisplayProfileEditor *)(id)marker error:&staleError]
+                   && controller.saves == baselineSaves, "removed ordinal cannot be edited");
+            controller.displayProfiles = [NSMutableArray arrayWithArray:@[sibling, profile]];
+
+            YMManagedDisplay *duplicate = [YMManagedDisplay new];
+            duplicate.ordinal = 9; duplicate.friendlyName = @"Target"; duplicate.width = 1920; duplicate.height = 1080;
+            duplicate.display = [YMFakeDisplay new];
+            [controller.displayProfiles addObject:duplicate];
+            Expect([controller acceptProfileDraft:[[YMDisplayProfileDraft alloc] initWithName:@"ByOrdinal" width:1920 hiDPI:NO]
+                mode:YMDisplayProfileEditorModeEdit ordinal:profile.ordinal
+                editor:(YMDisplayProfileEditor *)(id)marker error:&staleError]
+                   && [profile.friendlyName isEqualToString:@"ByOrdinal"]
+                   && [duplicate.friendlyName isEqualToString:@"Target"],
+                   "same-name profiles still resolve by ordinal");
+            profile.friendlyName = @"Target";
+            controller.saves = baselineSaves;
+
+            display.live = YES;
+            Expect(![controller acceptProfileDraft:[[YMDisplayProfileDraft alloc] initWithName:@"Live" width:2560 hiDPI:YES]
+                mode:YMDisplayProfileEditorModeEdit ordinal:profile.ordinal
+                editor:(YMDisplayProfileEditor *)(id)marker error:&staleError]
+                   && profile.width == 1920 && controller.saves == baselineSaves,
+                   "edit rejects an already running target");
+            display.live = NO;
+
+            YMManagedDisplay *maxed = [YMManagedDisplay new];
+            maxed.ordinal = UINT16_MAX; maxed.friendlyName = @"Max"; maxed.width = 1920; maxed.height = 1080;
+            maxed.display = [YMFakeDisplay new];
+            [controller.displayProfiles addObject:maxed];
+            Expect(![controller acceptProfileDraft:[[YMDisplayProfileDraft alloc] initWithName:@"Overflow" width:1920 hiDPI:NO]
+                mode:YMDisplayProfileEditorModeCreate ordinal:0
+                editor:(YMDisplayProfileEditor *)(id)marker error:&staleError]
+                   && controller.displayProfiles.count == baselineProfiles + 2
+                   && controller.saves == baselineSaves && display.creates == baselineCreates,
+                   "exhausted ordinals reject create before write");
+            [controller.displayProfiles removeObject:maxed];
+
+            Expect(![controller acceptProfileDraft:[[YMDisplayProfileDraft alloc] initWithName:@"BadMode" width:1920 hiDPI:NO]
+                mode:(YMDisplayProfileEditorMode)99 ordinal:profile.ordinal
+                editor:(YMDisplayProfileEditor *)(id)marker error:&staleError]
+                   && controller.saves == baselineSaves, "illegal mode is rejected");
+            Expect(![controller acceptProfileDraft:[[YMDisplayProfileDraft alloc] initWithName:@"BadOrdinal" width:1920 hiDPI:NO]
+                mode:YMDisplayProfileEditorModeCreate ordinal:7
+                editor:(YMDisplayProfileEditor *)(id)marker error:&staleError]
+                   && controller.saves == baselineSaves, "create requires ordinal zero");
+            Expect(![controller acceptProfileDraft:[[YMDisplayProfileDraft alloc] initWithName:@"a\tb" width:1920 hiDPI:NO]
+                mode:YMDisplayProfileEditorModeEdit ordinal:profile.ordinal
+                editor:(YMDisplayProfileEditor *)(id)marker error:&staleError]
+                   && controller.saves == baselineSaves, "control characters reject before write");
+
+            controller.profileEditorCommitInProgress = YES;
+            Expect(![controller acceptProfileDraft:[[YMDisplayProfileDraft alloc] initWithName:@"Reentry" width:1920 hiDPI:NO]
+                mode:YMDisplayProfileEditorModeEdit ordinal:profile.ordinal
+                editor:(YMDisplayProfileEditor *)(id)marker error:&staleError]
+                   && controller.saves == baselineSaves, "synchronous reentry is rejected");
+            controller.profileEditorCommitInProgress = NO;
+
+            id sheet = [NSObject new];
+            marker.window = sheet;
+            gateWindow.attachedSheet = sheet;
+            Expect([controller profileActionsAvailableForEditor:(YMDisplayProfileEditor *)(id)marker],
+                   "current sheet may submit through its own editor");
+            Expect(![controller profileActionsAvailableForEditor:nil],
+                   "external entry stays blocked while sheet is attached");
+            Expect(NSApp == nil, "gate checks stay headless");
+        }
+
+        {
+            YMFakeTopology *topology; YMFakeDisplay *display; YMManagedDisplay *profile, *sibling;
+            YMFakeController *controller = Controller(&topology, &display, &profile, &sibling);
+            profile.width = 1920; profile.height = 1080; profile.friendlyName = @"StartTarget";
+            sibling.ordinal = 1;
+            YMHeadlessProfileWindow *startWindow = [YMHeadlessProfileWindow new];
+            controller.window = (NSWindow *)(id)startWindow;
+            controller.profileEditor = nil;
+            NSUInteger baselineCreates = display.creates;
+            NSUInteger baselineSaves = controller.saves;
+            void (^expectStartRejected)(NSString *, void (^)(void)) = ^(NSString *name, void (^mutate)(void)) {
+                mutate();
+                NSError *error = nil;
+                BOOL started = [controller startSavedProfileWithOrdinal:profile.ordinal error:&error];
+                Expect(!started && error != nil, name.UTF8String);
+                Expect(display.creates == baselineCreates && controller.saves == baselineSaves
+                       && !profile.starting && !profile.display.isCreated
+                       && [profile.friendlyName isEqualToString:@"StartTarget"],
+                       [[name stringByAppendingString:@" leaves model untouched"] UTF8String]);
+                controller.previewMode = NO;
+                controller.updateWorkspaceBusy = NO;
+                controller.appOperationInProgress = NO;
+                controller.displayOperationInProgress = NO;
+                controller.armed = NO;
+                controller.preparing = NO;
+                controller.restoring = NO;
+                controller.layoutChangedForTrial = NO;
+                controller.recoveryRequested = NO;
+                controller.topologyRecoverySnapshot = nil;
+                startWindow.attachedSheet = nil;
+                controller.profileEditor = nil;
+                controller.window = (NSWindow *)(id)startWindow;
+            };
+            expectStartRejected(@"updateWorkspaceBusy rejects saved start", ^{ controller.updateWorkspaceBusy = YES; });
+            expectStartRejected(@"appOperationInProgress rejects saved start", ^{ controller.appOperationInProgress = YES; });
+            expectStartRejected(@"displayOperationInProgress rejects saved start", ^{ controller.displayOperationInProgress = YES; });
+            expectStartRejected(@"armed rejects saved start", ^{ controller.armed = YES; });
+            expectStartRejected(@"preparing rejects saved start", ^{ controller.preparing = YES; });
+            expectStartRejected(@"restoring rejects saved start", ^{ controller.restoring = YES; });
+            expectStartRejected(@"layoutChangedForTrial rejects saved start", ^{ controller.layoutChangedForTrial = YES; });
+            expectStartRejected(@"recoveryRequested rejects saved start", ^{ controller.recoveryRequested = YES; });
+            expectStartRejected(@"topologyRecoverySnapshot rejects saved start", ^{
+                controller.topologyRecoverySnapshot = topology.snapshot;
+            });
+            expectStartRejected(@"attachedSheet rejects saved start", ^{
+                startWindow.attachedSheet = [NSObject new];
+            });
+            Expect(NSApp == nil, "saved start gate checks stay headless");
+        }
+
+        {
+            YMFakeTopology *topology; YMFakeDisplay *display; YMManagedDisplay *profile, *sibling;
+            YMFakeController *controller = Controller(&topology, &display, &profile, &sibling);
+            sibling.ordinal = 1;
+            profile.width = 1920; profile.height = 1080;
+            controller.deferTopologyOperations = YES;
+            NSError *error = nil;
+            Expect([controller startSavedProfileWithOrdinal:profile.ordinal error:&error], "saved start accepted");
+            Expect(profile.starting && controller.displayOperationInProgress, "pending state follows real transaction");
+            Expect(![controller canMoveIntoProfile:profile], "unverified display rejects admission");
+            Expect(display.creates == 1 && controller.saves == 0, "saved start neither duplicates nor resaves profile");
+            [controller runNextTopologyOperation];
+            Expect(!profile.starting && profile.topologyVerified, "verified completion clears pending state");
+            Expect(display.creates == 1 && controller.saves == 0, "completion remains single start with no config write");
+        }
+
+        {
+            YMFakeTopology *topology; YMFakeDisplay *display; YMManagedDisplay *profile, *sibling;
+            YMFakeController *controller = Controller(&topology, &display, &profile, &sibling);
+            sibling.ordinal = 1; profile.width = 1920; profile.height = 1080;
+            NSError *error = nil;
+            topology.captureResult = NO;
+            Expect([controller startSavedProfileWithOrdinal:profile.ordinal error:&error], "capture failure still accepted into transaction");
+            Expect(!profile.starting && [profile.startFailureText isEqualToString:@"无法读取显示配置，请重试。"]
+                   && [controller.pendingProfileRevealOrdinal isEqualToNumber:@(profile.ordinal)]
+                   && display.creates == 0 && controller.saves == 0
+                   && [(YMFakeDisplay *)sibling.display destroys] == 0,
+                   "capture failure keeps config and sibling");
+            Expect([[controller profileActivityText] isEqualToString:@""], "idle activity text stays empty after capture failure");
+        }
+
+        {
+            YMFakeTopology *topology; YMFakeDisplay *display; YMManagedDisplay *profile, *sibling;
+            YMFakeController *controller = Controller(&topology, &display, &profile, &sibling);
+            sibling.ordinal = 1; profile.width = 1920; profile.height = 1080;
+            NSError *error = nil;
+            display.createResult = NO;
+            Expect([controller startSavedProfileWithOrdinal:profile.ordinal error:&error], "create failure accepted");
+            Expect(!profile.starting && [profile.startFailureText isEqualToString:@"无法创建虚拟屏，请确认当前系统支持该功能。"]
+                   && controller.saves == 0 && [(YMFakeDisplay *)sibling.display destroys] == 0,
+                   "create failure retains saved profile");
+        }
+
+        {
+            YMFakeTopology *topology; YMFakeDisplay *display; YMManagedDisplay *profile, *sibling;
+            YMFakeController *controller = Controller(&topology, &display, &profile, &sibling);
+            sibling.ordinal = 1; profile.width = 1920; profile.height = 1080;
+            NSError *error = nil;
+            topology.configureResult = NO;
+            Expect([controller startSavedProfileWithOrdinal:profile.ordinal error:&error], "configure failure accepted");
+            Expect(!profile.starting && [profile.startFailureText isEqualToString:@"显示配置核验失败，已恢复原排列；可重试。"]
+                   && !display.live && controller.saves == 0
+                   && [(YMFakeDisplay *)sibling.display destroys] == 0,
+                   "configure failure restores and keeps sibling");
+        }
+
+        {
+            YMFakeTopology *topology; YMFakeDisplay *display; YMManagedDisplay *profile, *sibling;
+            YMFakeController *controller = Controller(&topology, &display, &profile, &sibling);
+            sibling.ordinal = 1; profile.width = 1920; profile.height = 1080;
+            NSError *error = nil;
+            topology.configureResult = NO; topology.restoreResult = NO;
+            Expect([controller startSavedProfileWithOrdinal:profile.ordinal error:&error], "restore failure accepted");
+            Expect(!profile.starting && [profile.startFailureText isEqualToString:@"显示排列待恢复，请先使用恢复入口。"]
+                   && controller.topologyRecoverySnapshot == topology.snapshot
+                   && controller.saves == 0 && [(YMFakeDisplay *)sibling.display destroys] == 0,
+                   "incomplete recovery blocks restart messaging");
+            NSArray<YMSavedDisplayProfileRow *> *rows = [controller savedProfileRows];
+            Expect(rows.count == 1 && rows.firstObject.ordinal == profile.ordinal
+                   && !rows.firstObject.canStart && !rows.firstObject.canEdit
+                   && [rows.firstObject.message containsString:@"待恢复"],
+                   "recovery pending disables saved-row actions");
+            Expect([[controller profileActivityText] containsString:@"待恢复"], "activity text exposes recovery gate");
+        }
+
+        {
+            YMFakeTopology *topology; YMFakeDisplay *display; YMManagedDisplay *profile, *sibling;
+            YMFakeController *controller = Controller(&topology, &display, &profile, &sibling);
+            sibling.ordinal = 1; profile.width = 1920; profile.height = 1080;
+            NSError *error = nil;
+            topology.configureResult = NO; topology.restoreResult = NO;
+            Expect([controller startSavedProfileWithOrdinal:profile.ordinal error:&error],
+                   "restore failure before retry accepted");
+            Expect(controller.topologyRecoverySnapshot == topology.snapshot
+                   && ![[controller savedProfileRows].firstObject canStart]
+                   && [[[controller savedProfileRows].firstObject message] containsString:@"待恢复"],
+                   "pending recovery gates start before retry");
+            topology.restoreResult = YES;
+            [controller retryTopologyRecovery:nil];
+            NSArray<YMSavedDisplayProfileRow *> *rows = [controller savedProfileRows];
+            Expect(!controller.topologyRecoverySnapshot
+                   && rows.count == 1
+                   && rows.firstObject.canStart
+                   && rows.firstObject.canEdit
+                   && ![rows.firstObject.message containsString:@"待恢复"]
+                   && (profile.startFailureText.length == 0
+                       || ![profile.startFailureText containsString:@"待恢复"]),
+                   "successful recovery clears stale pending message and restores actions");
+            Expect(![[controller profileActivityText] containsString:@"待恢复"],
+                   "activity text clears after successful recovery");
+        }
+
+        {
+            YMFakeTopology *topology; YMFakeDisplay *display; YMManagedDisplay *profile, *sibling;
+            YMFakeController *controller = Controller(&topology, &display, &profile, &sibling);
+            sibling.ordinal = 1; profile.width = 1920; profile.height = 1080;
+            NSError *error = nil;
+            controller.powerFails = YES;
+            Expect([controller startSavedProfileWithOrdinal:profile.ordinal error:&error], "power failure accepted");
+            Expect(!profile.starting && [profile.startFailureText isEqualToString:@"无法保持图形桌面唤醒，已取消启动。"]
+                   && !display.live && controller.saves == 0
+                   && [(YMFakeDisplay *)sibling.display destroys] == 0,
+                   "power failure rolls back only the new target");
+        }
+
+        {
+            YMFakeTopology *topology; YMFakeDisplay *display; YMManagedDisplay *profile, *sibling;
+            YMFakeController *controller = Controller(&topology, &display, &profile, &sibling);
+            sibling.ordinal = 1; profile.width = 1920; profile.height = 1080;
+            YMHeadlessProfileEditor *marker = [YMHeadlessProfileEditor new];
+            controller.profileEditor = (YMDisplayProfileEditor *)(id)marker;
+            NSUInteger beforeCount = controller.displayProfiles.count;
+            NSError *error = nil;
+            Expect([controller acceptProfileDraft:[[YMDisplayProfileDraft alloc] initWithName:@" Fresh " width:2560 hiDPI:YES]
+                mode:YMDisplayProfileEditorModeCreate ordinal:0
+                editor:(YMDisplayProfileEditor *)(id)marker error:&error], "create request accepted");
+            Expect(controller.displayProfiles.count == beforeCount + 1 && controller.saves == 1
+                   && display.creates == 0, "create persists once before start");
+            YMManagedDisplay *created = controller.displayProfiles.lastObject;
+            Expect(created.ordinal == 3 && [created.friendlyName isEqualToString:@"Fresh"]
+                   && created.width == 2560 && created.height == 1440 && created.hiDPI
+                   && created.topologyVerified && !created.starting
+                   && [(YMFakeDisplay *)created.display creates] == 1
+                   && [(YMFakeDisplay *)sibling.display destroys] == 0,
+                   "create allocates next ordinal and starts once");
+            NSUInteger createdOrdinal = created.ordinal;
+            NSUInteger savesAfterCreate = controller.saves;
+            [(YMFakeDisplay *)created.display destroy];
+            created.topologyVerified = NO;
+            Expect([controller startSavedProfileWithOrdinal:createdOrdinal error:&error]
+                   && created.ordinal == createdOrdinal
+                   && controller.displayProfiles.count == beforeCount + 1
+                   && controller.saves == savesAfterCreate,
+                   "retry keeps the same ordinal without another save");
+        }
+
+        {
+            YMFakeTopology *topology; YMFakeDisplay *display; YMManagedDisplay *profile, *sibling;
+            YMFakeController *controller = Controller(&topology, &display, &profile, &sibling);
+            [controller create:nil];
+            Expect(display.creates == 1 && controller.saves == 1 && profile.topologyVerified,
+                   "legacy create wrapper still persists on success");
+        }
+
+        {
+            YMFakeTopology *topology; YMFakeDisplay *display; YMManagedDisplay *profile, *sibling;
+            YMFakeController *controller = Controller(&topology, &display, &profile, &sibling);
+            sibling.ordinal = 1;
+            profile.width = 1920; profile.height = 1080; profile.hiDPI = YES; profile.friendlyName = @"Saved";
+            YMHeadlessProfileEditor *marker = [YMHeadlessProfileEditor new];
+            controller.profileEditor = (YMDisplayProfileEditor *)(id)marker;
+            NSError *error = nil;
+            VDVirtualDisplay *originalDisplay = profile.display;
+            Expect([controller acceptProfileDraft:[[YMDisplayProfileDraft alloc] initWithName:@" Renamed " width:800 hiDPI:NO]
+                mode:YMDisplayProfileEditorModeRename ordinal:profile.ordinal
+                editor:(YMDisplayProfileEditor *)(id)marker error:&error]
+                   && [profile.friendlyName isEqualToString:@"Renamed"]
+                   && profile.width == 1920 && profile.height == 1080 && profile.hiDPI
+                   && profile.display == originalDisplay && controller.saves == 1 && display.creates == 0,
+                   "rename keeps dimensions display object and saves once");
+            NSArray<YMSavedDisplayProfileRow *> *rows = [controller savedProfileRows];
+            Expect(rows.count == 1 && rows.firstObject.ordinal == profile.ordinal
+                   && [rows.firstObject.name containsString:@"Renamed"]
+                   && [rows.firstObject.detail containsString:@"HiDPI"]
+                   && rows.firstObject.canStart && rows.firstObject.canEdit,
+                   "saved rows project uncreated profiles only");
+            display.live = YES;
+            Expect([controller savedProfileRows].count == 0, "running profiles leave the saved list");
+            display.live = NO;
+            profile.starting = YES;
+            Expect([[controller profileActivityText] containsString:@"启动中"]
+                   && ![controller savedProfileRows].firstObject.canStart,
+                   "starting state wins over ordinary actions");
+            Expect(NSApp == nil, "projection helpers stay headless");
+        }
 
         Expect(NSApp == nil,"all controller tests leave NSApplication uninitialized");
         printf("Controller boundary tests: %lu passed, %lu failed; no GUI or display calls executed.\n",(unsigned long)(Tests-Failures),(unsigned long)Failures);

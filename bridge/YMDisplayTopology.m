@@ -4,6 +4,7 @@
 #import <stdatomic.h>
 
 NSErrorDomain const YMDisplayTopologyErrorDomain = @"dev.chekusu.yomado.DisplayTopology";
+NSString *const YMDisplayTopologyDiagnosticsKey = @"displayTopologyDiagnostics";
 
 static BOOL YMFail(NSError **error, NSInteger code, NSString *message) {
     if (error) *error = [NSError errorWithDomain:YMDisplayTopologyErrorDomain code:code
@@ -12,7 +13,16 @@ static BOOL YMFail(NSError **error, NSInteger code, NSString *message) {
 }
 
 static NSArray<NSString *> *YMModeKeys(void) {
-    return @[@"modeWidth", @"modeHeight", @"pixelWidth", @"pixelHeight", @"refreshRate", @"modeFlags", @"modeID"];
+    return @[@"modeWidth", @"modeHeight", @"pixelWidth", @"pixelHeight", @"refreshRate", @"modeFlags",
+        @"modeUsableForDesktopGUI", @"modeID"];
+}
+
+static NSArray<NSString *> *YMModePropertyKeys(void) {
+    // The driver-local mode identifier is not a requested display property.
+    // Keep it in observation/race checks, but do not reset an otherwise equal
+    // mode just to recover an older identifier after a topology change.
+    return @[@"modeWidth", @"modeHeight", @"pixelWidth", @"pixelHeight", @"refreshRate", @"modeFlags",
+        @"modeUsableForDesktopGUI"];
 }
 
 static NSDictionary *YMModeDescription(CGDisplayModeRef mode) {
@@ -21,6 +31,7 @@ static NSDictionary *YMModeDescription(CGDisplayModeRef mode) {
         @"modeWidth":@(CGDisplayModeGetWidth(mode)), @"modeHeight":@(CGDisplayModeGetHeight(mode)),
         @"pixelWidth":@(CGDisplayModeGetPixelWidth(mode)), @"pixelHeight":@(CGDisplayModeGetPixelHeight(mode)),
         @"refreshRate":@(CGDisplayModeGetRefreshRate(mode)), @"modeFlags":@(CGDisplayModeGetIOFlags(mode)),
+        @"modeUsableForDesktopGUI":@(CGDisplayModeIsUsableForDesktopGUI(mode)),
         @"modeID":@(CGDisplayModeGetIODisplayModeID(mode))};
 }
 
@@ -31,6 +42,43 @@ static BOOL YMValuesEqual(id left, id right) {
 static BOOL YMKeysEqual(NSDictionary *left, NSDictionary *right, NSArray<NSString *> *keys) {
     for (NSString *key in keys) if (!YMValuesEqual(left[key], right[key])) return NO;
     return YES;
+}
+
+static NSDictionary *YMSafeModeDiagnostic(NSDictionary *item) {
+    NSMutableDictionary *mode = [NSMutableDictionary dictionary];
+    for (NSString *key in YMModeKeys()) {
+        id value = item[key];
+        if ([value isKindOfClass:NSNumber.class] && isfinite([value doubleValue])) mode[key] = value;
+    }
+    return mode.copy;
+}
+
+static NSString *YMModeSummary(NSDictionary *mode) {
+    if (!mode[@"modeWidth"]) return @"unavailable";
+    return [NSString stringWithFormat:@"%@×%@ points, %@×%@ pixels, %@ Hz, flags %@, desktop GUI %@, mode %@",
+        mode[@"modeWidth"], mode[@"modeHeight"], mode[@"pixelWidth"], mode[@"pixelHeight"],
+        mode[@"refreshRate"], mode[@"modeFlags"], mode[@"modeUsableForDesktopGUI"], mode[@"modeID"]];
+}
+
+static BOOL YMModeFailure(NSError **error, NSError *failure, NSDictionary *saved,
+                          NSDictionary *current, CGDirectDisplayID newDisplayID) {
+    BOOL isNew = newDisplayID && [saved[@"displayID"] unsignedIntValue] == newDisplayID;
+    NSString *role = isNew ? @"new virtual display"
+        : [saved[@"mirrorOf"] unsignedIntValue] ? @"existing mirror follower"
+        : [saved[@"inMirrorSet"] boolValue] ? @"existing mirror primary" : @"existing extended display";
+    NSDictionary *savedMode = YMSafeModeDiagnostic(saved), *currentMode = YMSafeModeDiagnostic(current);
+    NSInteger code = failure ? failure.code : kCGErrorFailure;
+    NSDictionary *details = @{@"operation":@"setDisplayMode", @"role":role,
+        @"cgError":@(code), @"active":@([current[@"active"] boolValue]),
+        @"main":@([current[@"main"] boolValue]), @"builtin":@([current[@"builtin"] boolValue]),
+        @"rotation":@([current[@"rotation"] doubleValue]), @"savedMode":savedMode, @"currentMode":currentMode};
+    NSString *message = [NSString stringWithFormat:
+        @"macOS could not restore the saved display mode (%@, %@; CGError %ld). Saved: %@. Current: %@.",
+        role, [current[@"active"] boolValue] ? @"active" : @"inactive", (long)code,
+        YMModeSummary(savedMode), YMModeSummary(currentMode)];
+    if (error) *error = [NSError errorWithDomain:failure.domain ?: YMDisplayTopologyErrorDomain code:code
+        userInfo:@{NSLocalizedDescriptionKey:message, YMDisplayTopologyDiagnosticsKey:details}];
+    return NO;
 }
 
 static BOOL YMHasRequestedMode(NSDictionary *item, NSUInteger width, NSUInteger height, BOOL hiDPI) {
@@ -276,16 +324,22 @@ static void YMReconfigured(CGDirectDisplayID display, CGDisplayChangeSummaryFlag
     return YES;
 }
 
-- (BOOL)statesOf:(NSArray<NSDictionary *> *)actual match:(NSArray<NSDictionary *> *)expected {
+- (BOOL)statesOf:(NSArray<NSDictionary *> *)actual match:(NSArray<NSDictionary *> *)expected
+ includingModeIdentifiers:(BOOL)includingModeIdentifiers {
     NSMutableDictionary *byID = [NSMutableDictionary dictionary];
     for (NSDictionary *item in actual) byID[item[@"displayID"]] = item;
     NSArray *keys = @[@"main", @"active", @"online", @"rotation", @"mirrorOf", @"inMirrorSet",
         @"x", @"y", @"logicalWidth", @"logicalHeight"];
     for (NSDictionary *item in expected) {
         NSDictionary *live = byID[item[@"displayID"]];
-        if (!live || !YMKeysEqual(item, live, keys) || !YMKeysEqual(item, live, YMModeKeys())) return NO;
+        if (!live || !YMKeysEqual(item, live, keys)
+            || !YMKeysEqual(item, live, includingModeIdentifiers ? YMModeKeys() : YMModePropertyKeys())) return NO;
     }
     return YES;
+}
+
+- (BOOL)statesOf:(NSArray<NSDictionary *> *)actual match:(NSArray<NSDictionary *> *)expected {
+    return [self statesOf:actual match:expected includingModeIdentifiers:YES];
 }
 
 - (NSArray<NSDictionary *> *)readCompleteDisplaysWithGuard:(BOOL (^)(NSArray<NSDictionary *> *, NSError **))guard
@@ -380,6 +434,7 @@ static void YMReconfigured(CGDirectDisplayID display, CGDisplayChangeSummaryFlag
 
 - (BOOL)verifyExpected:(NSArray<NSDictionary *> *)expected error:(NSError **)error {
     NSUInteger stable = 0, generation = self.backend.reconfigurationGeneration;
+    NSArray *previous = nil;
     // Success requires matching full topology across independent observations,
     // not merely waiting a fixed delay or seeing a single cached good snapshot.
     for (NSUInteger attempt = 0; attempt < 30; attempt++) {
@@ -389,15 +444,17 @@ static void YMReconfigured(CGDirectDisplayID display, CGDisplayChangeSummaryFlag
         } error:error];
         if (!live || ![self identitiesOf:live match:expected error:error]) return NO;
         NSUInteger nextGeneration = self.backend.reconfigurationGeneration;
-        if (generation != nextGeneration) stable = 0;
+        if (generation != nextGeneration || (previous && ![self statesOf:live match:previous])) stable = 0;
         generation = nextGeneration;
-        if ([self statesOf:live match:expected]) stable++; else stable = 0;
+        previous = live;
+        if ([self statesOf:live match:expected includingModeIdentifiers:NO]) stable++; else stable = 0;
         if (stable >= 5 && attempt >= 14) return YES;
     }
     return YMFail(error, 17, @"macOS did not preserve the requested display layout, main screen, modes and mirror relationships. Application moves remain disabled.");
 }
 
-- (BOOL)apply:(NSArray<NSDictionary *> *)expected from:(NSArray<NSDictionary *> *)current error:(NSError **)error {
+- (BOOL)apply:(NSArray<NSDictionary *> *)expected from:(NSArray<NSDictionary *> *)current
+ newDisplayID:(CGDirectDisplayID)newDisplayID error:(NSError **)error {
     if (![self identitiesOf:current match:expected error:error]) return NO;
     NSDictionary *currentByID = [self index:current error:error];
     if (!currentByID) return NO;
@@ -406,10 +463,10 @@ static void YMReconfigured(CGDirectDisplayID display, CGDisplayChangeSummaryFlag
         NSDictionary *live = currentByID[item[@"displayID"]];
         if (!YMValuesEqual(item[@"rotation"], live[@"rotation"]))
             return YMFail(error, 18, @"A display's rotation changed; restore it in System Settings before continuing.");
-        if (!YMKeysEqual(item, live, YMModeKeys()) && !item[@"modeToken"])
+        if (!YMKeysEqual(item, live, YMModePropertyKeys()) && !item[@"modeToken"])
             return YMFail(error, 19, @"The original display mode cannot be restored safely.");
     }
-    if ([self statesOf:current match:expected]) return [self verifyExpected:expected error:error];
+    if ([self statesOf:current match:expected includingModeIdentifiers:NO]) return [self verifyExpected:expected error:error];
     // Fresh identity check immediately before obtaining the transaction.
     NSUInteger generation = self.backend.reconfigurationGeneration;
     NSArray *fresh = [self readCompleteDisplaysWithGuard:^BOOL(NSArray *items, NSError **guardError) {
@@ -431,8 +488,10 @@ static void YMReconfigured(CGDirectDisplayID display, CGDisplayChangeSummaryFlag
     }
     if (staged) for (NSDictionary *item in expected) {
         NSDictionary *live = currentByID[item[@"displayID"]];
-        if (!YMKeysEqual(item, live, YMModeKeys())) {
-            staged = [self.backend setModeOfDisplay:[item[@"displayID"] unsignedIntValue] token:item[@"modeToken"] error:error];
+        if (!YMKeysEqual(item, live, YMModePropertyKeys())) {
+            NSError *failure = nil;
+            staged = [self.backend setModeOfDisplay:[item[@"displayID"] unsignedIntValue] token:item[@"modeToken"] error:&failure];
+            if (!staged) YMModeFailure(error, failure, item, live, newDisplayID);
             if (!staged) break;
         }
     }
@@ -544,7 +603,7 @@ static void YMReconfigured(CGDirectDisplayID display, CGDisplayChangeSummaryFlag
     target[@"rotation"] = @0;
     NSMutableArray *expected = [baseline.displays mutableCopy];
     [expected addObject:target];
-    return [self apply:expected from:current error:error];
+    return [self apply:expected from:current newDisplayID:displayID error:error];
 }
 
 - (BOOL)restoreAndVerifySnapshot:(YMDisplayTopologySnapshot *)snapshot excludingDisplayID:(CGDirectDisplayID)displayID error:(NSError **)error {
@@ -603,7 +662,7 @@ static void YMReconfigured(CGDirectDisplayID display, CGDisplayChangeSummaryFlag
         if ([self verifyExpected:desired.displays error:NULL]) return YES;
         return YMFail(error, 30, @"Another display setting changed. Automatic recovery has been stopped to preserve that change; restore the intended layout in System Settings.");
     }
-    return [self apply:desired.displays from:current error:error];
+    return [self apply:desired.displays from:current newDisplayID:0 error:error];
 }
 
 - (BOOL)verifySnapshot:(YMDisplayTopologySnapshot *)snapshot error:(NSError **)error {
@@ -639,7 +698,7 @@ static void YMReconfigured(CGDirectDisplayID display, CGDisplayChangeSummaryFlag
     } error:error];
     if (!current || ![self statesOf:current match:baseline.displays])
         return YMFail(error, 34, @"The display layout changed during workspace restoration; no positions were written.");
-    return [self apply:expected from:current error:error];
+    return [self apply:expected from:current newDisplayID:0 error:error];
 }
 
 - (BOOL)isExtendedTarget:(CGDirectDisplayID)displayID width:(NSUInteger)width height:(NSUInteger)height hiDPI:(BOOL)hiDPI {
