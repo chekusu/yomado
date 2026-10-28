@@ -85,6 +85,8 @@
 @property BOOL useRealPanelPresentation;
 @property BOOL useProductionAppRestore;
 @property BOOL useProductionUnmovableConfirmation;
+@property BOOL useProductionStop;
+@property NSMutableArray<NSString *> *quitEvents;
 @property NSMutableArray<NSDictionary *> *pendingTopologyOperations;
 - (void)runNextTopologyOperation;
 @end
@@ -120,6 +122,10 @@
     (void)displayIDs;
     return YES;
 }
+- (void)logQuitStep:(NSString *)step {
+    if (!self.quitEvents) self.quitEvents = [NSMutableArray array];
+    [self.quitEvents addObject:step];
+}
 - (void)showWindow:(id)sender {
     self.showCalls++;
     if (self.useRealPanelPresentation) [super showWindow:sender];
@@ -137,6 +143,7 @@
     return profile;
 }
 - (void)stop:(id)sender {
+    if (self.useProductionStop) { [super stop:sender]; return; }
     (void)sender; self.stopCalls++;
     // The termination decision is production logic. This boundary models the
     // actual stop outcome: the last owned output is gone, recovery still fails.
@@ -164,6 +171,10 @@
 @property(nonatomic, strong) NSMutableArray<NSNumber *> *restoreDisplayIDs;
 @property(nonatomic) CGDirectDisplayID restoreFailureDisplayID;
 @property(nonatomic) NSUInteger cancelAllowanceCalls;
+@property(nonatomic) NSUInteger closeTransactionDepth;
+@property(nonatomic) NSUInteger completedTransactions;
+- (void)beginCloseTransaction;
+- (void)endCloseTransaction;
 - (NSArray<NSDictionary *> *)unmovableWindowsForDisplayID:(CGDirectDisplayID)displayID;
 - (void)allowUnmovableWindowsOnDisplayID:(CGDirectDisplayID)displayID;
 - (void)cancelUnmovableWindowAllowances;
@@ -196,6 +207,15 @@
 }
 - (void)allowUnmovableWindowsOnDisplayID:(CGDirectDisplayID)displayID {
     [self.allowedDisplayIDs addObject:@(displayID)];
+}
+- (void)beginCloseTransaction {
+    if (self.closeTransactionDepth++ == 0) [self cancelUnmovableWindowAllowances];
+}
+- (void)endCloseTransaction {
+    if (self.closeTransactionDepth && --self.closeTransactionDepth == 0) {
+        [self cancelUnmovableWindowAllowances];
+        self.completedTransactions++;
+    }
 }
 - (void)cancelUnmovableWindowAllowances {
     self.cancelAllowanceCalls++;
@@ -1090,8 +1110,42 @@ int main(void) {
             Expect(firstDisplay.live && secondDisplay.live &&
                    [quitWorkspace.restoreDisplayIDs isEqualToArray:@[@101, @202]],
                    "quit restores every workspace before removing any screen");
-            Expect(quitWorkspace.allowedDisplayIDs.count == 0 && quitWorkspace.cancelAllowanceCalls == 1,
+            Expect(quitWorkspace.allowedDisplayIDs.count == 0 && quitWorkspace.cancelAllowanceCalls == 3,
                    "failed multi-screen quit clears temporary unmovable-window allowances");
+            Expect(quitWorkspace.closeTransactionDepth == 0 && quitWorkspace.completedTransactions == 1,
+                   "failed multi-screen quit ends its consent transaction");
+
+            // Production stop returns on restoration failure before any live display call.
+            YMUnmovableWorkspace *stopWorkspace = [YMUnmovableWorkspace new];
+            stopWorkspace.windowsByDisplayID[@202] = @[@{@"appName": @"Private fixture application", @"count": @1}];
+            stopWorkspace.restoreFailureDisplayID = 202;
+            YMUnmovableController *stopController = [YMUnmovableController new];
+            stopController.displayProfiles = [NSMutableArray arrayWithObject:secondProfile];
+            stopController.selectedProfile = secondProfile;
+            stopController.virtualDisplay = secondDisplay;
+            stopController.appWorkspace = (YMAppWorkspace *)(id)stopWorkspace;
+            stopController.useProductionStop = YES;
+            stopController.useProductionUnmovableConfirmation = YES;
+            stopController.useProductionAppRestore = YES;
+            stopController.confirmationResponse = YES;
+            [stopController stop:nil];
+            Expect(secondDisplay.live && stopWorkspace.allowedDisplayIDs.count == 0 &&
+                   stopWorkspace.closeTransactionDepth == 0 && stopWorkspace.completedTransactions == 1,
+                   "production stop failure clears consent and leaves display alive");
+            Expect(![[stopController.quitEvents componentsJoinedByString:@"\n"] containsString:@"Private fixture application"],
+                   "quit diagnostic events omit localized app names");
+            stopWorkspace.windowsByDisplayID[@202] = @[@{@"appName": @"New dialog application", @"count": @2}];
+            stopController.confirmationResponse = NO;
+            NSUInteger shownBeforeCancel = stopController.showCalls;
+            [stopController stop:nil];
+            Expect(stopController.confirmationCalls == 2 &&
+                   [stopController.confirmationSummary containsString:@"New dialog application"],
+                   "retry prompts with new unmatched windows rather than reusing consent");
+            Expect(secondDisplay.live && stopWorkspace.closeTransactionDepth == 0 &&
+                   stopWorkspace.allowedDisplayIDs.count == 0 && stopWorkspace.completedTransactions == 2,
+                   "canceled retry clears its own transaction and keeps display");
+            Expect(stopController.showCalls == shownBeforeCancel && NSApp == nil,
+                   "canceled close does not open the control panel or instantiate NSApplication");
         }
 
         // Group 5: ready wait + single restore write; timeout retains virtual display.
