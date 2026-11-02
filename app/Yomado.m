@@ -155,6 +155,7 @@ static NSString *JSONText(id object) { return JSONTextWithIdentifiers(object, NO
 @property NSTextField *statusLabel;
 @property NSTextField *inventoryLabel;
 @property NSTextField *detailLabel;
+@property NSStackView *outputRecoveryStatusRow;
 @property YMStatusPill *statusPill;
 @property NSTextField *wechatStatusLabel;
 @property NSTextField *wechatPermissionGuide;
@@ -166,9 +167,8 @@ static NSString *JSONText(id object) { return JSONTextWithIdentifiers(object, NO
 @property BOOL previewMode;
 @property(copy) NSString *previewState;
 @property(copy) NSArray<NSDictionary *> *previewSnapshot;
-@property NSPopUpButton *physicalChoice;
-@property NSButton *testButton;
-@property NSButton *keepButton;
+// Turning physical outputs off is offered only while ⌃⌥⌘R can bring them back.
+@property BOOL recoveryHotkeyReady;
 @property NSButton *restoreButton;
 @property VDVirtualDisplay *virtualDisplay; // Selected target for the legacy guarded physical-output trial.
 @property NSMutableArray<YMManagedDisplay *> *displayProfiles;
@@ -201,6 +201,8 @@ static NSString *JSONText(id object) { return JSONTextWithIdentifiers(object, NO
 @property BOOL restoring;
 @property BOOL recoveryRequested;
 @property BOOL layoutChangedForTrial;
+@property NSTimeInterval restoreStarted;
+@property BOOL restoreStalled;
 @property NSUInteger operationGeneration;
 @property NSTimeInterval trialDeadline;
 @property IOPMAssertionID systemAssertion;
@@ -220,9 +222,11 @@ static NSString *JSONText(id object) { return JSONTextWithIdentifiers(object, NO
 @property(nonatomic, strong) NSMutableDictionary *displayProfilesPreferenceStore;
 @property(nonatomic, copy) NSArray<NSDictionary *> *(^inventorySnapshotProvider)(void);
 - (void)restore:(id)sender;
+- (void)restoreManually:(id)sender;
 - (void)buildWindow;
 - (void)preparePanelPresenter;
 - (void)updateInventory;
+- (void)updateOutputRecoveryPresentation;
 // Private test seam: production returns DisplaySnapshot(); tests override with fixtures.
 - (NSArray<NSDictionary *> *)controllerDisplaySnapshot;
 - (void)beginUpdater;
@@ -251,7 +255,7 @@ static NSString *JSONText(id object) { return JSONTextWithIdentifiers(object, NO
 static OSStatus RecoveryHotkey(EventHandlerCallRef next, EventRef event, void *data) {
     (void)next; (void)event;
     ADController *controller = (__bridge ADController *)data;
-    [controller restore:nil];
+    [controller restoreManually:nil];
     return noErr;
 }
 static NSTextField *Label(NSString *text, CGFloat size, NSFontWeight weight) {
@@ -481,16 +485,17 @@ static os_log_t YMQuitLog(void) {
     EventHotKeyID hotkeyID = { 'ADsp', 1 };
     OSStatus keyStatus = RegisterEventHotKey(kVK_ANSI_R, controlKey | optionKey | cmdKey,
                                             hotkeyID, GetApplicationEventTarget(), 0, &_hotkey);
-    if (handlerStatus != noErr || keyStatus != noErr) {
-        self.testButton.enabled = NO;
+    self.recoveryHotkeyReady = handlerStatus == noErr && keyStatus == noErr;
+    if (!self.recoveryHotkeyReady)
         self.detailLabel.stringValue = @"恢复快捷键注册失败；为保留恢复途径，实体屏关闭功能已停用。";
-    }
     [self updateInventory];
     [self restoreUpdateWorkspace];
     self.heartbeatTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 target:self selector:@selector(tick:)
                                                        userInfo:nil repeats:YES];
     [NSWorkspace.sharedWorkspace.notificationCenter addObserver:self selector:@selector(systemWillSleep:)
           name:NSWorkspaceWillSleepNotification object:nil];
+    [NSDistributedNotificationCenter.defaultCenter addObserver:self selector:@selector(screenDidLock:)
+          name:@"com.apple.screenIsLocked" object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(displayParametersChanged:)
           name:NSApplicationDidChangeScreenParametersNotification object:nil];
 }
@@ -600,6 +605,10 @@ static os_log_t YMQuitLog(void) {
         [submenu addItem:NSMenuItem.separatorItem];
         [submenu addItem:[self menuItem:@"在控制面板中管理…" action:@selector(showProfile:) profile:profile]];
         [submenu addItem:[self menuItem:@"关闭这个虚拟屏" action:@selector(closeProfile:) profile:profile]];
+        if ([self canTurnOffPhysicalOutputsForProfile:profile]) {
+            [submenu addItem:NSMenuItem.separatorItem];
+            [submenu addItem:[self menuItem:@"关闭实体屏，只留这块屏…" action:@selector(turnOffPhysicalOutputs:) profile:profile]];
+        }
         screen.submenu = submenu; [menu addItem:screen];
     }
     if (!active.count) [menu addItem:[[NSMenuItem alloc] initWithTitle:@"尚无运行中的虚拟屏" action:nil keyEquivalent:@""]];
@@ -609,7 +618,7 @@ static os_log_t YMQuitLog(void) {
     if (self.topologyRecoverySnapshot)
         [menu addItem:[self menuItem:@"重试恢复显示排列…" action:@selector(retryTopologyRecovery:) profile:nil]];
     if (self.armed || self.layoutChangedForTrial || self.recoveryRequested)
-        [menu addItem:[self menuItem:@"恢复实体显示器" action:@selector(restore:) profile:nil]];
+        [menu addItem:[self menuItem:@"恢复实体显示器" action:@selector(restoreManually:) profile:nil]];
     [menu addItem:NSMenuItem.separatorItem];
     [menu addItem:[[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"yomado %@", YMAppVersion()] action:nil keyEquivalent:@""]];
     [menu addItem:[self menuItem:self.automaticUpdater.busy ? [self updateStatusText] : @"检查并安装更新…" action:@selector(checkForUpdates:) profile:nil]];
@@ -1251,9 +1260,23 @@ static os_log_t YMQuitLog(void) {
     [board setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
                                     forOrientation:NSLayoutConstraintOrientationVertical];
 
-    NSTextField *inputHint = Label(@"实体屏与虚拟屏仍共用键鼠与焦点；不会隔离 Agent 输入，也不会关闭实体显示器。", 11, NSFontWeightRegular);
+    NSTextField *inputHint = Label(@"实体屏与虚拟屏仍共用键鼠与焦点；不会隔离 Agent 输入。日常创建虚拟屏不会关闭实体显示器。", 11, NSFontWeightRegular);
     inputHint.textColor = NSColor.secondaryLabelColor;
     [stack addArrangedSubview:inputHint]; YMFillWidth(inputHint, stack);
+
+    // Recovery controls must remain understandable after automatic retries stop.
+    // Ordinary status messages stay out of the panel outside this explicit mode.
+    self.outputRecoveryStatusRow = YMStack(NSUserInterfaceLayoutOrientationVertical, 3);
+    self.outputRecoveryStatusRow.hidden = YES;
+    self.statusLabel = Label(@"", 12, NSFontWeightSemibold);
+    self.detailLabel = Label(@"", 11, NSFontWeightRegular);
+    self.detailLabel.textColor = NSColor.secondaryLabelColor;
+    [self.outputRecoveryStatusRow addArrangedSubview:self.statusLabel];
+    YMFillWidth(self.statusLabel, self.outputRecoveryStatusRow);
+    [self.outputRecoveryStatusRow addArrangedSubview:self.detailLabel];
+    YMFillWidth(self.detailLabel, self.outputRecoveryStatusRow);
+    [stack addArrangedSubview:self.outputRecoveryStatusRow];
+    YMFillWidth(self.outputRecoveryStatusRow, stack);
 
     self.savedProfilesView = [[YMSavedDisplayProfilesView alloc] initWithFrame:NSZeroRect];
     __weak ADController *weakSelf = self;
@@ -1338,9 +1361,6 @@ static os_log_t YMQuitLog(void) {
     [self.updateStatusRow addArrangedSubview:self.cancelUpdateButton];
     [stack addArrangedSubview:self.updateStatusRow]; YMFillWidth(self.updateStatusRow, stack);
 
-    // Status messages are retained for recovery diagnostics, not permanent UI.
-    self.statusLabel = Label(@"", 12, NSFontWeightRegular);
-    self.detailLabel = Label(@"", 11, NSFontWeightRegular);
     [self preparePanelPresenter];
 }
 - (void)displayParametersChanged:(NSNotification *)notification {
@@ -1636,7 +1656,19 @@ static os_log_t YMQuitLog(void) {
             self.statusLabel.stringValue = @"";
             self.detailLabel.stringValue = @"界面示例 · 应用图标为示意；不会读取本机窗口。";
         }
+        [self updateOutputRecoveryPresentation];
     } @finally { self.updatingInventory = NO; }
+}
+- (void)updateOutputRecoveryPresentation {
+    BOOL recovering = self.restoring || self.recoveryRequested;
+    BOOL active = self.preparing || self.armed || recovering || self.layoutChangedForTrial || self.restoreStalled;
+    self.outputRecoveryStatusRow.hidden = !active;
+    if (!active) return;
+    self.statusPill.text = self.restoreStalled ? @"实体屏待恢复"
+        : recovering ? @"恢复实体屏…"
+        : self.preparing ? @"准备关闭实体屏…"
+        : self.armed ? @"实体屏已关闭" : @"显示排列待恢复";
+    self.statusPill.tint = self.restoreStalled ? NSColor.systemRedColor : NSColor.systemOrangeColor;
 }
 - (void)powerAssertions:(BOOL)on {
     if (self.previewMode) return;
@@ -1958,40 +1990,60 @@ static os_log_t YMQuitLog(void) {
     NSError *error = nil;
     return [self.watchdog launchAndReturnError:&error];
 }
-- (void)startTrial:(id)sender {
-    if (self.previewMode) return;
-    (void)sender;
-    if (self.updateWorkspaceBusy || [self activeProfiles].count != 1 || self.displayOperationInProgress || self.appOperationInProgress || self.armed || self.preparing || self.restoring || self.recoveryRequested || self.layoutChangedForTrial
-        || ![self canMoveIntoProfile:self.selectedProfile]) return;
-    CGDirectDisplayID target = [self.physicalChoice.selectedItem.representedObject unsignedIntValue];
-    if (!target || target == self.virtualDisplay.displayID || [VDVirtualDisplay isVirtualDisplay:target]) return;
-    if (CGDisplayIsInMirrorSet(target)) {
-        self.detailLabel.stringValue = @"请先解除该实体显示器的镜像，再进行关屏测试。";
+- (BOOL)canTurnOffPhysicalOutputsForProfile:(YMManagedDisplay *)profile {
+    return !self.previewMode && self.recoveryHotkeyReady && !self.updateWorkspaceBusy && !self.displayOperationInProgress &&
+        !self.appOperationInProgress && !self.armed && !self.preparing && !self.restoring && !self.recoveryRequested &&
+        !self.layoutChangedForTrial && [self canMoveIntoProfile:profile];
+}
+// Disconnect every physical output and keep the chosen virtual screen as the
+// main display. A disabled output is not display sleep, which on Macs set to
+// require a password immediately locks the session and stops agent work. The
+// watchdog restores the outputs if yomado exits; ⌃⌥⌘R and the menu-bar item
+// restore them on request.
+- (void)turnOffPhysicalOutputs:(NSMenuItem *)sender {
+    YMManagedDisplay *profile = [sender isKindOfClass:NSMenuItem.class] ? sender.representedObject : nil;
+    if (![self canTurnOffPhysicalOutputsForProfile:profile]) return;
+    [self selectProfile:profile];
+    if (self.selectedProfile != profile) return;
+    NSArray<NSDictionary *> *outputs = YMPhysicalOutputTargets(DisplaySnapshot());
+    if (!outputs) {
+        self.detailLabel.stringValue = @"请先解除实体显示器的镜像，再关闭实体屏。";
         return;
     }
+    if (!outputs.count) return;
     NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"开始实验性 15 秒关屏测试？";
-    alert.informativeText = @"试验会将虚拟屏设为主屏、改变显示排列，再关闭所选实体输出。macOS 或应用可能移动其他窗口，恢复不能保证窗口原位。请先保存工作，并确保能直接接触 Mac 和显示器。不确认将尝试自动恢复；恢复快捷键：⌃⌥⌘R。";
-    [alert addButtonWithTitle:@"开始测试"];
+    alert.messageText = @"关闭实体屏输出？";
+    alert.informativeText = [NSString stringWithFormat:@"所有实体显示器会断开输出并黑屏，「%@」成为主屏；Mac 保持唤醒，Agent 可以继续在虚拟屏上工作。\n\n恢复：按 ⌃⌥⌘R，或在菜单栏 yomado 中选「恢复实体显示器」。yomado 意外退出时会自动恢复。\n\n显示排列会临时改变，macOS 可能移动窗口。断开输出不同于显示器睡眠；如果 Mac 没有锁屏，靠近这台 Mac 的人按 ⌃⌥⌘R 后即可使用它。",
+        [self titleForProfile:profile]];
+    [alert addButtonWithTitle:@"关闭实体屏"];
     [alert addButtonWithTitle:@"取消"];
+    alert.buttons.firstObject.keyEquivalent = @"";
+    alert.buttons.lastObject.keyEquivalent = @"\r";
     if ([alert runModal] != NSAlertFirstButtonReturn) return;
-    // Recovery belongs to this explicit trial, never to display creation time.
+    if (![self canTurnOffPhysicalOutputsForProfile:profile]) return;
+    // The dialog can stay open across a plug or unplug. Never act on a stale list.
+    if (![YMPhysicalOutputTargets(DisplaySnapshot()) isEqualToArray:outputs]) {
+        self.detailLabel.stringValue = @"确认期间显示器连接发生变化，实体屏保持开启。请重新选择。";
+        return;
+    }
+    NSArray<NSNumber *> *targets = [outputs valueForKey:@"displayID"];
+    // Recovery belongs to this explicit request, never to display creation time.
     self.originalLayout = DisplaySnapshot();
     self.originalMain = CGMainDisplayID();
-    self.targets = @[@(target)];
+    self.targets = targets;
     self.preparing = YES;
     self.recoveryRequested = NO;
     NSUInteger generation = ++self.operationGeneration;
-    self.statusLabel.stringValue = @"准备虚拟桌面与自动恢复…";
+    self.statusLabel.stringValue = @"准备虚拟主屏与自动恢复…";
     if (![self ensureWatchdog]) {
         [self restore:nil];
         self.statusLabel.stringValue = @"没有关闭实体屏";
-        self.detailLabel.stringValue = @"恢复进程或虚拟主屏准备失败，请重试。";
+        self.detailLabel.stringValue = @"独立恢复进程未能启动，请重试。";
         [self updateInventory];
         return;
     }
     // Retain the snapshot even if completion fails: an attempted configuration
-    // must be recovered before removal or another trial is allowed.
+    // must be recovered before removal or another attempt is allowed.
     self.layoutChangedForTrial = YES;
     if (![self writeStateEnding:NO] || ![self setVirtualMain:YES]) {
         [self restore:nil];
@@ -2008,15 +2060,13 @@ static os_log_t YMQuitLog(void) {
             self.detailLabel.stringValue = @"虚拟主屏或独立恢复进程未就绪，实体屏保持开启。";
             return;
         }
-        NSScreen *virtualScreen = nil;
-        for (NSScreen *screen in NSScreen.screens)
-            if ([screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue] == self.virtualDisplay.displayID) virtualScreen = screen;
-        if (virtualScreen) {
-            NSRect frame = virtualScreen.visibleFrame;
-            [self.window setFrameOrigin:NSMakePoint(frame.origin.x + 40, frame.origin.y + MAX(30, frame.size.height - 660))];
+        if (![YMPhysicalOutputTargets(DisplaySnapshot()) isEqualToArray:outputs]) {
+            [self restore:nil];
+            self.detailLabel.stringValue = @"准备期间显示器连接发生变化，实体屏保持开启。请重新选择。";
+            return;
         }
         self.armed = YES;
-        self.trialDeadline = NSDate.date.timeIntervalSince1970 + 15;
+        self.trialDeadline = 0;
         if (![self writeStateEnding:NO]) { [self restore:nil]; return; }
         NSString *failure = nil;
         if (!ConfigureEnabled(self.targets, NO, &failure)) {
@@ -2025,27 +2075,11 @@ static os_log_t YMQuitLog(void) {
             return;
         }
         self.preparing = NO;
-        self.keepButton.enabled = YES;
-        self.detailLabel.stringValue = @"在虚拟桌面确认截图和点击正常后，点击「确认可操作，保持关屏」。未确认会自动恢复。";
+        self.statusLabel.stringValue = @"虚拟桌面运行中 · 实体屏已断开输出";
+        self.detailLabel.stringValue = @"输出已断开，但软件无法测量显示器的实际功耗。\n恢复：⌃⌥⌘R，或菜单栏「恢复实体显示器」。";
+        [self writeStateEnding:NO];
         [self updateInventory];
     });
-}
-- (void)keepOff:(id)sender {
-    if (self.previewMode) return;
-    (void)sender;
-    if (!self.armed || self.trialDeadline <= 0 || !ADDisplayActive(self.virtualDisplay.displayID)) return;
-    for (NSNumber *ident in self.targets) {
-        if (ADDisplayActive(ident.unsignedIntValue)) {
-            self.detailLabel.stringValue = @"实体屏仍处于活动状态，无法确认关屏成功。";
-            return;
-        }
-    }
-    self.trialDeadline = 0;
-    self.keepButton.enabled = NO;
-    self.statusLabel.stringValue = @"虚拟桌面运行中 · 实体屏已断开输出";
-    self.detailLabel.stringValue = @"请确认实体屏确实不发光。输出已断开，但软件无法测量显示器的实际功耗。\n恢复：⌃⌥⌘R，或菜单栏「恢复实体显示器」。";
-    [self writeStateEnding:NO];
-    [self updateInventory];
 }
 - (void)restore:(id)sender {
     if (self.previewMode) return;
@@ -2056,19 +2090,28 @@ static os_log_t YMQuitLog(void) {
     self.recoveryRequested = self.armed || self.layoutChangedForTrial;
     [self writeStateEnding:NO];
     self.preparing = NO;
-    self.keepButton.enabled = NO;
     self.trialDeadline = 0;
+    [self updateOutputRecoveryPresentation];
+    NSTimeInterval now = [self outputRestoreClock];
+    if ((self.armed || self.layoutChangedForTrial) && !self.restoreStarted) self.restoreStarted = now;
+    NSTimeInterval elapsed = now - self.restoreStarted;
     NSString *failure = nil;
     if (self.armed && !ConfigureEnabled(self.targets, YES, &failure)) {
+        if (YMRestoreDeadlineReached(elapsed)) { [self stallRestore]; return; }
         self.statusLabel.stringValue = @"实体屏恢复失败，虚拟屏继续保留";
         self.detailLabel.stringValue = failure ?: @"每秒重试恢复；独立恢复进程也已收到恢复信号。";
         self.restoring = NO;
         return;
     }
     if (self.armed) {
-        BOOL allActive = YES;
-        for (NSNumber *ident in self.targets) allActive &= ADDisplayActive(ident.unsignedIntValue) != 0;
-        if (!allActive) {
+        NSUInteger darkConnected = 0, offline = 0;
+        for (NSNumber *ident in self.targets) {
+            if (ADDisplayActive(ident.unsignedIntValue)) continue;
+            if (ADDisplayOnline(ident.unsignedIntValue)) ++darkConnected; else ++offline;
+        }
+        YMOutputRestoreStep step = YMOutputRestoreStepFor(darkConnected, offline, elapsed);
+        if (step == YMOutputRestoreGiveUp) { [self stallRestore]; return; }
+        if (step == YMOutputRestoreWait) {
             // Reconfiguration is asynchronous. Do not release the last usable desktop.
             self.statusLabel.stringValue = @"等待实体屏恢复…";
             self.restoring = NO;
@@ -2076,6 +2119,7 @@ static os_log_t YMQuitLog(void) {
         }
     }
     if (self.layoutChangedForTrial && ![self setVirtualMain:NO]) {
+        if (YMRestoreDeadlineReached(elapsed)) { [self stallRestore]; return; }
         self.statusLabel.stringValue = @"显示排列恢复失败，虚拟屏继续保留";
         self.detailLabel.stringValue = @"将继续尝试恢复本次试验前的排列。请检查实体屏连接。";
         self.restoring = NO;
@@ -2084,6 +2128,8 @@ static os_log_t YMQuitLog(void) {
     self.layoutChangedForTrial = NO;
     self.armed = NO;
     self.recoveryRequested = NO;
+    self.restoreStarted = 0;
+    self.restoreStalled = NO;
     [self finishWatchdog];
     [self writeStateEnding:NO];
     self.statusLabel.stringValue = self.virtualDisplay.isCreated ? @"实体屏已恢复，虚拟屏仍保留" : @"尚未创建虚拟屏";
@@ -2091,6 +2137,26 @@ static os_log_t YMQuitLog(void) {
     self.restoring = NO;
     [self updateInventory];
     [self showWindow:nil];
+}
+// The retry window must not grow when wall-clock time is adjusted.
+- (NSTimeInterval)outputRestoreClock {
+    return NSProcessInfo.processInfo.systemUptime;
+}
+// Stop the automatic retries; the hotkey and menu item stay available.
+- (void)stallRestore {
+    self.restoreStalled = YES;
+    self.recoveryRequested = NO;
+    self.statusLabel.stringValue = @"实体屏恢复未完成";
+    self.detailLabel.stringValue = @"已自动重试 1 分钟。请检查显示器连接，然后按 ⌃⌥⌘R 或在菜单栏选「恢复实体显示器」重试。";
+    self.restoring = NO;
+    [self updateOutputRecoveryPresentation];
+    [self showWindow:nil];
+}
+// The hotkey and menu item start a fresh retry window.
+- (void)restoreManually:(id)sender {
+    self.restoreStalled = NO;
+    self.restoreStarted = 0;
+    [self restore:sender];
 }
 - (void)tick:(NSTimer *)timer {
     if (self.previewMode) return;
@@ -2104,14 +2170,15 @@ static os_log_t YMQuitLog(void) {
         self.appOperationInProgress = NO;
     }
     [self updateInventory];
-    if (![self writeStateEnding:NO] && self.armed) { [self restore:nil]; return; }
+    if (![self writeStateEnding:NO] && self.armed && !self.restoreStalled) { [self restore:nil]; return; }
     NSString *restoredPath = [self.statePath stringByAppendingString:@".restored"];
     if ([NSFileManager.defaultManager fileExistsAtPath:restoredPath]) {
         [NSFileManager.defaultManager removeItemAtPath:restoredPath error:nil];
         [self restore:nil];
         self.detailLabel.stringValue = @"独立恢复进程已恢复实体屏。重新测试前请确认虚拟屏可用。";
     }
-    if (self.recoveryRequested || (self.armed && (!self.watchdog.running || !ADDisplayActive(self.virtualDisplay.displayID)))) { [self restore:nil]; return; }
+    if (self.recoveryRequested || (self.armed && !self.restoreStalled
+        && (!self.watchdog.running || !ADDisplayActive(self.virtualDisplay.displayID)))) { [self restore:nil]; return; }
     if (self.armed && self.trialDeadline > 0) {
         NSInteger remaining = (NSInteger)ceil(self.trialDeadline - NSDate.date.timeIntervalSince1970);
         if (remaining <= 0) { [self restore:nil]; return; }
@@ -2119,6 +2186,11 @@ static os_log_t YMQuitLog(void) {
     }
 }
 - (void)systemWillSleep:(NSNotification *)notification { (void)notification; [self restore:nil]; }
+// The login window must be visible on a physical display.
+- (void)screenDidLock:(NSNotification *)notification {
+    (void)notification;
+    if (self.armed || self.layoutChangedForTrial) [self restoreManually:nil];
+}
 - (BOOL)restoreApplicationsForDisplayID:(CGDirectDisplayID)displayID {
     if (self.appOperationInProgress) return NO;
     self.appOperationInProgress = YES;
