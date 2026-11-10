@@ -2665,7 +2665,10 @@ static const NSTimeInterval YMDisplayCommandSeconds = 45;
     if ([action isEqualToString:@"list"]) {
         NSMutableArray *displays = [NSMutableArray array];
         for (YMManagedDisplay *profile in self.displayProfiles) [displays addObject:[self displayCommandInfoForProfile:profile]];
-        [self displayCommandRespond:requestID status:@"ok" extra:@{@"displays":displays}];
+        [self.appWorkspace refreshInventory];
+        NSDictionary *inventory = @{@"ready":@(self.appWorkspace.inventoryReady),
+            @"accessibilityTrusted":@(self.appWorkspace.accessibilityTrusted), @"status":self.appWorkspace.statusText ?: @""};
+        [self displayCommandRespond:requestID status:@"ok" extra:@{@"displays":displays, @"inventory":inventory}];
         return;
     }
     if (name.length == 0 || name.length > 64) {
