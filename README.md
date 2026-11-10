@@ -2,7 +2,7 @@
 
 # yomado · 夜窗
 
-A work screen for visual agents, designed to let physical screens rest.
+A work screen for visual agents, designed to let physical screens rest. yomado adds named virtual displays to your Mac, so Codex and other computer-use AI agents can work in desktop apps through screenshots, mouse and keyboard on a screen of their own while your windows stay where they are.
 
 [Website](https://yomado.app/) · [Download for Apple Silicon](https://github.com/chekusu/yomado/releases/download/v0.3.7/Yomado.zip) · [Release notes](https://github.com/chekusu/yomado/releases/tag/v0.3.7) · [简体中文](README.zh-CN.md) · [MIT license](LICENSE)
 
@@ -56,6 +56,29 @@ The virtual display belongs to your **existing login session**. It is not a sepa
 The compact panel presents **yomado · 夜窗**, a short tagline, and the screen layout with app icons inside each screen. App names and window counts are available on hover; controls appear as icons and menus. Valid drag targets highlight and their icons gently wiggle; Reduce Motion uses a static highlight. Click “New Display” to name a display and choose its resolution and HiDPI setting before creating and starting it. Saved displays that are not running appear below the overview, with direct Start and Edit actions. Use a running display’s menu to rename or close it; close it before changing resolution or HiDPI. “Add or Start a Virtual Display…” in the menu bar opens the control panel.
 
 A local live test used the application chooser to move Calculator from a physical screen into Codex, then into GrokBot. A fresh screenshot on GrokBot showed the Calculator window, and typing `2 + 3` followed by Return produced `5`. Returning Calculator restored its original window position and size. These checks verify the chooser-based moves, virtual-to-virtual transfer, screenshot, keyboard input and explicit return for that app. A separate test with one virtual display also confirmed that closing it restored Calculator’s original position and size, then removed the virtual display. Direct icon dragging, closing one virtual display while another remains active, and the monitor-off workflow remain unverified.
+
+## FAQ
+
+**How do I give Codex or another computer-use agent its own screen on a Mac?**
+Install yomado, add a virtual display named after the agent, and drag the task's apps onto it. The agent's own computer-use tools capture and operate that screen. With the [yomado skill](skills/yomado/SKILL.md) installed, the agent can set up the screen itself and move the windows back when it is done.
+
+**Why not let the agent use my main screen?**
+An agent that works through screenshots and clicks needs its apps visible somewhere. On your main screen they sit on top of your work; on a virtual display they render out of your way, and you can still look at the agent's screen in yomado's panel or any screen viewer.
+
+**Do I need an HDMI dummy plug or a display utility?**
+No. yomado creates the displays in software. General display utilities can also add virtual displays; yomado is built around agent work: one named screen per agent, moving a task's windows onto it and back, and a skill that lets the agent do this itself.
+
+**Does the agent get its own mouse and keyboard?**
+No. Virtual displays are part of your login session, so you and the agent share one pointer, keyboard and focus. See [Share the mouse and keyboard](#share-the-mouse-and-keyboard).
+
+**Is yomado a virtual machine, a remote desktop or an MCP server?**
+None of these; it only supplies the display. Unlike a macOS virtual machine, the agent works with the apps already installed in your own session, and no app-specific MCP integration is needed.
+
+**Can the agent keep working with my monitors switched off?**
+That is the goal, but it has not been validated yet. See [Physical monitors](#physical-monitors).
+
+**Which Macs does it run on, and what does it cost?**
+Apple silicon Macs, built for macOS 14 and later. Free and open source under the MIT license; official releases are signed with Developer ID and notarized by Apple. It is experimental and uses private macOS APIs.
 
 ## Build
 
