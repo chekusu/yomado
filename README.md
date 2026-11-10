@@ -122,6 +122,21 @@ Off by default. Enable it once with `defaults write dev.chekusu.yomado YMDisplay
 
 `start` creates the named screen if it doesn't exist and waits until topology is verified; the reply includes its display ID and desktop bounds. `close` uses the same window recovery as the panel but never shows a dialog: if windows can't be returned, it keeps the screen and replies `failed` with the reason. `list` includes `inventory.ready`; the window list settles a moment after windows move, so poll `list` until `ready` is true before closing. Moving windows onto the screen stays with the agent's own tools. Each command prints one JSON line; exit status 0 means `ok`, `running` or `closed`, 2 a refusal or failure, 3 yomado not running.
 
+## Watch and take over
+
+Turn on **在屏幕边缘预览虚拟屏** in the menu-bar menu to see what an agent is doing without giving it a physical screen. Screen Recording permission is required.
+
+- A thin tab per running virtual display sits at the right edge of the rightmost physical screen. Hover to expand live thumbnails; click one to open a picture-in-picture panel. Thumbnails update at 2 fps; the open panel updates at 30 fps. Panels never take focus.
+- `Yomado --display mark --x <x> --y <y>` draws a short ripple where an agent just acted, so the person can follow its clicks.
+- While the preview is on, the person's pointer is kept off virtual displays. If it slides past a physical edge into one, it is put back at the nearest physical point. Agents do not use the real pointer, so they are unaffected. Set `YMCursorFenceEnabled` to change this.
+- **Take over** (opt-in: `defaults write dev.chekusu.yomado YMWorkspacePreviewTakeoverEnabled -bool true`): the panel's 接管 button lets the person click and type into the virtual display, for example to pass a verification check, while agents see `"takeover": true` in `--display list` and pause.
+  - Clicks press the accessibility element under the point.
+  - Typing goes through the system input method, so Pinyin works, and is written into the focused field.
+  - Command-V pastes.
+  - The person's pointer, front app and key window are never used.
+  - Esc, 交还给 Agent, or leaving the panel for 3 seconds hands control back.
+  - Scrolling, dragging and hover are not forwarded.
+
 ## Version and updates
 
 The panel footer links to [yomado.app](https://yomado.app/), this GitHub repository and the MIT license, alongside the installed version. Click the refresh icon next to the version, or **Check and Install Updates…** (`检查并安装更新…`) in the menu-bar menu. The menu bar uses a transparent, monochrome silhouette of the night-window logo that follows the system appearance; the full app icon keeps its dark background.

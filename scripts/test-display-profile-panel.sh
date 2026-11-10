@@ -14,8 +14,9 @@ xcrun clang -fobjc-arc -Wall -Wextra -Werror -g0 -mmacosx-version-min=14.0 \
   "$ym_ci_production/app/AppWorkspace.m" "$ym_ci_production/app/AppWorkspaceAccess.m" \
   "$ym_ci_production/app/AppWorkspaceView.m" "$ym_ci_production/app/InputLease.m" \
   "$ym_ci_production/app/DisplayProfileEditor.m" "$ym_ci_production/app/SavedDisplayProfilesView.m" \
+  "$ym_ci_production/app/WorkspacePreview.m" \
   "$ym_ci_production/bridge/VDVirtualDisplay.m" "$ym_ci_production/bridge/YMDisplayTopology.m" \
-  -framework AppKit -framework CoreGraphics -framework IOKit -framework Carbon -framework ApplicationServices -framework QuartzCore -framework ColorSync \
+  -framework AppKit -framework CoreGraphics -framework IOKit -framework Carbon -framework ApplicationServices -framework QuartzCore -framework ColorSync -framework ScreenCaptureKit -framework CoreMedia -framework CoreVideo -framework IOSurface \
   -F "$ym_ci_sparkle" -framework Sparkle "-Wl,-rpath,$ym_ci_sparkle" \
   -o "$ym_ci_tmp/profile-panel-tests"
 "$ym_ci_tmp/profile-panel-tests"
