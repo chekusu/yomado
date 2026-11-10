@@ -1,3 +1,4 @@
+#include <unistd.h>
 #ifndef YOMADO_APP_WORKSPACE_POLICY_H
 #define YOMADO_APP_WORKSPACE_POLICY_H
 #import <Foundation/Foundation.h>
@@ -232,6 +233,31 @@ static inline NSDictionary *YMWorkspaceBlocker(id pid, id windowID, NSString *re
     return blocker;
 }
 // Associate CG visibility with AX identity, then size and own by real AX geometry.
+// Native full screen draws an app's toolbar/title bar in separate thin windows
+// that CoreGraphics lists but Accessibility does not. Recognize only a strip
+// spanning its display's full width, at or above a same-app AX window that
+// fills that display's width down to its bottom edge (the full-screen window).
+static inline BOOL YMWorkspaceFullScreenAccessory(NSDictionary *cg, NSArray *axWindows, NSArray *displays) {
+    NSDictionary *f = YMWorkspaceGeometry(cg[@"frame"]);
+    if (!f || [f[@"height"] doubleValue] > 200) return NO;
+    NSDictionary *display = YMWorkspaceDisplayForFrame(f, displays);
+    NSDictionary *b = display ? YMWorkspaceGeometry(display[@"bounds"]) : nil;
+    if (!b) return NO;
+    const double tol = 1;
+    double fx = [f[@"x"] doubleValue], fy = [f[@"y"] doubleValue], fw = [f[@"width"] doubleValue], fh = [f[@"height"] doubleValue];
+    double bx = [b[@"x"] doubleValue], by = [b[@"y"] doubleValue], bw = [b[@"width"] doubleValue], bh = [b[@"height"] doubleValue];
+    if (fabs(fx - bx) > tol || fabs(fw - bw) > tol || fy < by - tol || fy + fh > by + bh + tol) return NO;
+    for (NSDictionary *ax in axWindows) {
+        if (![ax isKindOfClass:NSDictionary.class] || ![ax[@"identity"] isKindOfClass:NSDictionary.class]) continue;
+        if (![ax[@"identity"][@"pid"] isEqual:cg[@"pid"]]) continue;
+        NSDictionary *g = YMWorkspaceGeometry(ax[@"frame"]);
+        if (!g) continue;
+        double gx = [g[@"x"] doubleValue], gy = [g[@"y"] doubleValue], gw = [g[@"width"] doubleValue], gh = [g[@"height"] doubleValue];
+        if (fabs(gx - bx) <= tol && fabs(gw - bw) <= tol && fabs(gy + gh - (by + bh)) <= tol
+            && gh >= bh * 0.5 && fy <= gy + tol) return YES;
+    }
+    return NO;
+}
 static inline NSDictionary *YMWorkspaceNormalizeWindowSnapshot(
     NSArray<NSDictionary *> *cgWindows, NSArray<NSDictionary *> *axWindows,
     BOOL enumerationComplete, NSArray<NSDictionary *> *displays) {
@@ -295,6 +321,10 @@ static inline NSDictionary *YMWorkspaceNormalizeWindowSnapshot(
         NSDictionary *cg = cgByKey[key];
         NSDictionary *ax = axByKey[key];
         if (!ax) {
+            if (YMWorkspaceFullScreenAccessory(cg, axWindows, displays)) continue;
+            // yomado's own panel and alerts are never moved; an alert raised by a
+            // failed close must not block the retry.
+            if ([cg[@"pid"] intValue] == getpid()) continue;
             [blockers addObject:YMWorkspaceBlocker(cg[@"pid"], cg[@"windowID"], @"unmatched", nil)];
             complete = NO;
             continue;

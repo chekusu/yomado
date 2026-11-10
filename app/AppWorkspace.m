@@ -505,6 +505,7 @@ static const NSUInteger kYMInventoryMaxCGCandidates = 512;
     for (NSDictionary *cg in admitted) {
         NSString *key = YMWorkspaceWindowKey(cg[@"pid"], cg[@"windowID"]);
         id ax = axByKey[key];
+        if (!ax && (YMWorkspaceFullScreenAccessory(cg, axRecords, displays) || [cg[@"pid"] intValue] == getpid())) { [excluded addObject:key]; continue; }
         if (![ax isKindOfClass:NSDictionary.class]) continue;
         NSDictionary *subset = YMWorkspaceNormalizeWindowSnapshot(@[cg], @[ax], YES, displays);
         if (![subset[@"complete"] boolValue]) continue;
