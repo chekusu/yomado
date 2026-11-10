@@ -247,6 +247,9 @@ static NSString *JSONText(id object) { return JSONTextWithIdentifiers(object, NO
 - (void)restoreProfileEditorFocus;
 - (void)installPreviewProfilesForState:(NSString *)state;
 @end
+@interface ADController (YMDisplayCommands)
+- (void)startDisplayCommands;
+@end
 
 static OSStatus RecoveryHotkey(EventHandlerCallRef next, EventRef event, void *data) {
     (void)next; (void)event;
@@ -475,6 +478,7 @@ static os_log_t YMQuitLog(void) {
     [self buildWindow];
     self.inputLeases = [[YMInputLeaseCenter alloc] init];
     [self.inputLeases start];
+    [self startDisplayCommands];
     EventTypeSpec type = { kEventClassKeyboard, kEventHotKeyPressed };
     OSStatus handlerStatus = InstallEventHandler(GetApplicationEventTarget(), RecoveryHotkey, 1, &type,
                                                 (__bridge void *)self, &_keyHandler);
@@ -2604,6 +2608,185 @@ static int PreviewUI(NSString *path, NSString *state, BOOL dark) {
     return 0;
 }
 
+// MARK: - Display command line (`Yomado --display list|start|close`)
+// Lets an agent prepare its own named work screen without driving the panel.
+// Off by default: enable with `defaults write dev.chekusu.yomado YMDisplayCommandsEnabled -bool true`.
+// Requests travel on the same local distributed-notification bus as --input and
+// reuse the panel's own create/start/close paths, including topology checks and
+// window recovery on close. Moving windows stays with the agent's own tools.
+static NSString *const YMDisplayCommandRequestName = @"dev.chekusu.yomado.display.request";
+static NSString *const YMDisplayCommandResponseName = @"dev.chekusu.yomado.display.response";
+static NSString *const YMDisplayCommandObject = @"dev.chekusu.yomado";
+static NSString *const YMDisplayCommandsEnabledKey = @"YMDisplayCommandsEnabled";
+static const NSTimeInterval YMDisplayCommandSeconds = 45;
+
+@implementation ADController (YMDisplayCommands)
+- (void)startDisplayCommands {
+    [NSDistributedNotificationCenter.defaultCenter addObserver:self selector:@selector(displayCommandReceived:)
+        name:YMDisplayCommandRequestName object:YMDisplayCommandObject
+        suspensionBehavior:NSNotificationSuspensionBehaviorDeliverImmediately];
+}
+- (void)displayCommandRespond:(NSString *)requestID status:(NSString *)status extra:(NSDictionary *)extra {
+    NSMutableDictionary *info = [extra ?: @{} mutableCopy];
+    info[@"requestID"] = requestID;
+    info[@"status"] = status;
+    [NSDistributedNotificationCenter.defaultCenter postNotificationName:YMDisplayCommandResponseName
+        object:YMDisplayCommandObject userInfo:info options:NSDistributedNotificationDeliverImmediately];
+}
+- (NSDictionary *)displayCommandInfoForProfile:(YMManagedDisplay *)profile {
+    NSMutableDictionary *info = [@{@"name":profile.friendlyName ?: @"", @"ordinal":@(profile.ordinal),
+        @"width":@(profile.width), @"height":@(profile.height), @"hiDPI":@(profile.hiDPI),
+        @"running":@(profile.display.isCreated && profile.topologyVerified), @"starting":@(profile.starting)} mutableCopy];
+    if (profile.startFailureText.length) info[@"failure"] = profile.startFailureText;
+    if (profile.display.isCreated) {
+        CGDirectDisplayID ident = profile.display.displayID;
+        CGRect bounds = CGDisplayBounds(ident);
+        info[@"displayID"] = @(ident);
+        info[@"bounds"] = @{@"x":@(bounds.origin.x), @"y":@(bounds.origin.y), @"width":@(bounds.size.width), @"height":@(bounds.size.height)};
+    }
+    return info;
+}
+- (YMManagedDisplay *)displayCommandProfileNamed:(NSString *)name {
+    for (YMManagedDisplay *profile in self.displayProfiles)
+        if ([profile.friendlyName isEqualToString:name]) return profile;
+    return nil;
+}
+- (void)displayCommandReceived:(NSNotification *)note {
+    NSDictionary *info = [note.userInfo isKindOfClass:NSDictionary.class] ? note.userInfo : @{};
+    NSString *requestID = [info[@"requestID"] isKindOfClass:NSString.class] ? info[@"requestID"] : nil;
+    if (requestID.length == 0 || requestID.length > 64) return;
+    if (![NSUserDefaults.standardUserDefaults boolForKey:YMDisplayCommandsEnabledKey]) {
+        [self displayCommandRespond:requestID status:@"disabled"
+            extra:@{@"message":@"Display commands are off. Enable with: defaults write dev.chekusu.yomado YMDisplayCommandsEnabled -bool true"}];
+        return;
+    }
+    NSString *action = [info[@"action"] isKindOfClass:NSString.class] ? info[@"action"] : @"";
+    NSString *name = [info[@"name"] isKindOfClass:NSString.class] ? info[@"name"] : @"";
+    if ([action isEqualToString:@"list"]) {
+        NSMutableArray *displays = [NSMutableArray array];
+        for (YMManagedDisplay *profile in self.displayProfiles) [displays addObject:[self displayCommandInfoForProfile:profile]];
+        [self displayCommandRespond:requestID status:@"ok" extra:@{@"displays":displays}];
+        return;
+    }
+    if (name.length == 0 || name.length > 64) {
+        [self displayCommandRespond:requestID status:@"failed" extra:@{@"message":@"--name is required (1-64 characters)."}];
+        return;
+    }
+    YMManagedDisplay *profile = [self displayCommandProfileNamed:name];
+    if ([action isEqualToString:@"start"]) {
+        if (profile.display.isCreated && profile.topologyVerified) {
+            [self displayCommandRespond:requestID status:@"running" extra:@{@"display":[self displayCommandInfoForProfile:profile]}];
+            return;
+        }
+        if (![self profileActionsAvailableForEditor:nil]) {
+            [self displayCommandRespond:requestID status:@"busy" extra:@{@"message":@"Another display or window operation is in progress."}];
+            return;
+        }
+        if (!profile) {
+            NSUInteger width = [info[@"width"] unsignedIntegerValue] == 2560 ? 2560 : 1920;
+            BOOL hiDPI = info[@"hiDPI"] ? [info[@"hiDPI"] boolValue] : YES;
+            NSUInteger next = 1;
+            for (YMManagedDisplay *existing in self.displayProfiles) next = MAX(next, existing.ordinal + 1);
+            profile = [self newProfileWithOrdinal:next name:name width:width height:width == 2560 ? 1440 : 1080 hiDPI:hiDPI];
+            [self.displayProfiles addObject:profile];
+            [self saveDisplayProfiles];
+        }
+        profile.startFailureText = nil;
+        [self selectProfile:profile];
+        if (self.selectedProfile == profile) [self createSelectedProfilePersistingOnSuccess:NO];
+        [self displayCommandAwait:profile requestID:requestID running:YES deadline:[NSDate dateWithTimeIntervalSinceNow:YMDisplayCommandSeconds - 5]];
+        return;
+    }
+    if ([action isEqualToString:@"close"]) {
+        if (!profile || !profile.display.isCreated) {
+            [self displayCommandRespond:requestID status:@"closed" extra:@{@"message":@"Display is not running."}];
+            return;
+        }
+        if (![self canPerformScreenMenuActionForProfile:profile]) {
+            [self displayCommandRespond:requestID status:@"busy" extra:@{@"message":@"Another display or window operation is in progress."}];
+            return;
+        }
+        [self selectProfile:profile];
+        if (self.selectedProfile == profile) [self stop:nil];
+        [self displayCommandAwait:profile requestID:requestID running:NO deadline:[NSDate dateWithTimeIntervalSinceNow:YMDisplayCommandSeconds - 5]];
+        return;
+    }
+    [self displayCommandRespond:requestID status:@"failed" extra:@{@"message":@"Unknown action. Use list, start or close."}];
+}
+- (void)displayCommandAwait:(YMManagedDisplay *)profile requestID:(NSString *)requestID running:(BOOL)wantRunning deadline:(NSDate *)deadline {
+    BOOL running = profile.display.isCreated && profile.topologyVerified;
+    if (wantRunning && running) {
+        [self displayCommandRespond:requestID status:@"running" extra:@{@"display":[self displayCommandInfoForProfile:profile]}];
+        return;
+    }
+    if (!wantRunning && !profile.display.isCreated) {
+        [self displayCommandRespond:requestID status:@"closed" extra:@{@"display":[self displayCommandInfoForProfile:profile]}];
+        return;
+    }
+    if (wantRunning && !profile.starting && !self.displayOperationInProgress && profile.startFailureText.length) {
+        [self displayCommandRespond:requestID status:@"failed" extra:@{@"message":profile.startFailureText}];
+        return;
+    }
+    if (deadline.timeIntervalSinceNow <= 0) {
+        [self displayCommandRespond:requestID status:@"failed"
+            extra:@{@"message":wantRunning ? @"Display did not start in time." : @"Display did not close; windows may still need to return. Use the panel."}];
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self displayCommandAwait:profile requestID:requestID running:wantRunning deadline:deadline];
+    });
+}
+@end
+
+static int YMDisplayCommandUsage(void) {
+    fprintf(stderr, "Usage: Yomado --display list\n"
+                    "       Yomado --display start --name <name> [--width 1920|2560] [--hidpi 1|0]\n"
+                    "       Yomado --display close --name <name>\n");
+    return 64;
+}
+
+static int YMDisplayCommand(int argc, const char *argv[]) {
+    @autoreleasepool {
+        if (argc < 3) return YMDisplayCommandUsage();
+        NSString *action = [NSString stringWithUTF8String:argv[2]];
+        if (![@[@"list", @"start", @"close"] containsObject:action]) return YMDisplayCommandUsage();
+        NSMutableDictionary *message = [@{@"action":action} mutableCopy];
+        for (int index = 3; index < argc; index += 2) {
+            if (index + 1 >= argc) return YMDisplayCommandUsage();
+            NSString *key = [NSString stringWithUTF8String:argv[index]];
+            NSString *value = [NSString stringWithUTF8String:argv[index + 1]];
+            if ([key isEqualToString:@"--name"]) message[@"name"] = value;
+            else if ([key isEqualToString:@"--width"]) message[@"width"] = @(value.integerValue);
+            else if ([key isEqualToString:@"--hidpi"]) message[@"hiDPI"] = @(value.boolValue);
+            else return YMDisplayCommandUsage();
+        }
+        if (![action isEqualToString:@"list"] && ![message[@"name"] length]) return YMDisplayCommandUsage();
+        NSString *requestID = NSUUID.UUID.UUIDString.lowercaseString;
+        message[@"requestID"] = requestID;
+        __block NSDictionary *reply = nil;
+        id token = [NSDistributedNotificationCenter.defaultCenter addObserverForName:YMDisplayCommandResponseName
+            object:YMDisplayCommandObject queue:nil usingBlock:^(NSNotification *note) {
+                if ([note.userInfo[@"requestID"] isEqual:requestID]) reply = note.userInfo;
+            }];
+        [NSDistributedNotificationCenter.defaultCenter postNotificationName:YMDisplayCommandRequestName
+            object:YMDisplayCommandObject userInfo:message options:NSDistributedNotificationDeliverImmediately];
+        NSDate *start = NSDate.date;
+        while (!reply && -start.timeIntervalSinceNow < YMDisplayCommandSeconds) {
+            @autoreleasepool { [NSRunLoop.currentRunLoop runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.1]]; }
+            if (!reply && -start.timeIntervalSinceNow > 3 && ![NSRunningApplication runningApplicationsWithBundleIdentifier:@"dev.chekusu.yomado"].count) break;
+        }
+        [NSDistributedNotificationCenter.defaultCenter removeObserver:token];
+        NSMutableDictionary *result = reply ? [reply mutableCopy] : [@{@"status":@"not-running"} mutableCopy];
+        [result removeObjectForKey:@"requestID"];
+        NSData *data = [NSJSONSerialization dataWithJSONObject:result options:NSJSONWritingSortedKeys error:nil];
+        printf("%s\n", [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding].UTF8String);
+        NSString *status = result[@"status"];
+        if ([@[@"ok", @"running", @"closed"] containsObject:status]) return 0;
+        return [status isEqualToString:@"not-running"] ? 3 : 2;
+    }
+}
+
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if (argc > 1 && strcmp(argv[1], "--preview-ui") == 0) {
@@ -2625,6 +2808,7 @@ int main(int argc, const char *argv[]) {
             return 0;
         }
         if (argc > 1 && strcmp(argv[1], "--input") == 0) return YMInputLeaseCommand(argc, argv);
+        if (argc > 1 && strcmp(argv[1], "--display") == 0) return YMDisplayCommand(argc, argv);
         if (argc > 2 && strcmp(argv[1], "--self-test") == 0)
             return SelfTest([NSString stringWithUTF8String:argv[2]], argc > 3 && strcmp(argv[3], "hidpi") == 0);
         if (argc > 3 && strcmp(argv[1], "--watchdog-test") == 0)
