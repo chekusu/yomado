@@ -505,6 +505,8 @@ static const NSUInteger kYMInventoryMaxCGCandidates = 512;
     for (NSDictionary *cg in admitted) {
         NSString *key = YMWorkspaceWindowKey(cg[@"pid"], cg[@"windowID"]);
         id ax = axByKey[key];
+        // yomado's own windows (the panel and its alerts) never block a close:
+        // yomado doesn't move them, and macOS relocates them when a display goes away.
         if (!ax && (YMWorkspaceFullScreenAccessory(cg, axRecords, displays) || [cg[@"pid"] intValue] == getpid())) { [excluded addObject:key]; continue; }
         if (![ax isKindOfClass:NSDictionary.class]) continue;
         NSDictionary *subset = YMWorkspaceNormalizeWindowSnapshot(@[cg], @[ax], YES, displays);

@@ -1,7 +1,7 @@
-#include <unistd.h>
 #ifndef YOMADO_APP_WORKSPACE_POLICY_H
 #define YOMADO_APP_WORKSPACE_POLICY_H
 #import <Foundation/Foundation.h>
+#include <unistd.h>
 #include <math.h>
 
 // These pure functions accept sanitized geometry only and have no GUI access.
