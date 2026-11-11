@@ -80,6 +80,8 @@ ym_flags=(
   "$ym_root/app/AppWorkspaceView.m" "$ym_root/app/InputLease.m" "$ym_root/bridge/VDVirtualDisplay.m" \
   "$ym_root/bridge/YMDisplayTopology.m" \
   "$ym_root/app/DisplayProfileEditor.m" "$ym_root/app/SavedDisplayProfilesView.m" \
+  "$ym_root/app/WorkspacePreview.m" \
+  -framework ScreenCaptureKit -framework CoreMedia -framework CoreVideo -framework IOSurface \
   -framework AppKit -framework CoreGraphics -framework ColorSync -framework IOKit -framework Carbon -framework ApplicationServices -framework QuartzCore \
   -F "$ym_sparkle" -framework Sparkle -Wl,-rpath,@executable_path/../Frameworks \
   -o "$ym_bundle/Contents/MacOS/Yomado"

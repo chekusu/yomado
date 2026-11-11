@@ -139,6 +139,18 @@ yomado 会在主屏弹出申请，提供「允许」和「拒绝」；60 秒内�
 
 yomado 自己不发送输入，也无法拦住 Agent 的工具。借用只是一种许可加可见提示：[yomado skill](skills/yomado/SKILL.md) 要求 Agent 每批真实输入前都检查一次，借用结束就立即停下。
 
+## 让 Agent 自己管理虚拟屏
+
+默认关闭。执行一次 `defaults write dev.chekusu.yomado YMDisplayCommandsEnabled -bool true` 开启；关闭时所有请求都回复 `disabled`。和 `--input` 一样，命令走本机通知总线，开启后以你身份运行的任何进程都能列出、启动或关闭 yomado 的虚拟屏。
+
+```sh
+./dist/Yomado.app/Contents/MacOS/Yomado --display list
+./dist/Yomado.app/Contents/MacOS/Yomado --display start --name "Claude" [--width 1920|2560] [--hidpi 1|0]
+./dist/Yomado.app/Contents/MacOS/Yomado --display close --name "Claude"
+```
+
+`start` 在虚拟屏不存在时新建，等拓扑核对完成后返回，回复里带显示器 ID 和桌面坐标。`close` 走和控制面板相同的窗口恢复流程，但不弹对话框：窗口回不去时保留虚拟屏，直接回复 `failed` 和原因。`list` 带 `inventory.ready`；窗口挪动后清单要过一会儿才稳定，关屏前请反复 `list` 直到 `ready` 为 true。把窗口挪进虚拟屏仍由 Agent 自己的工具完成。每条命令输出一行 JSON；退出码 0 表示 `ok`、`running` 或 `closed`，2 表示拒绝或失败，3 表示 yomado 没在运行。
+
 ## 版本与检查更新
 
 面板底部显示当前版本，并提供 [yomado.app](https://yomado.app/)、GitHub 源码和 MIT 协议入口。点击版本旁的刷新图标，或菜单栏菜单中的「检查并安装更新…」。菜单栏只保留夜窗 logo 的窗子轮廓，背景透明、颜色跟随系统外观；应用图标仍保留完整深色底图。

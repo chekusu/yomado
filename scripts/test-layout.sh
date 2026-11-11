@@ -43,9 +43,10 @@ ym_layout_sparkle="$("$ym_layout_root/scripts/fetch-sparkle.sh")"
   "$ym_layout_root/app/AppWorkspace.m" "$ym_layout_root/app/AppWorkspaceAccess.m" \
   "$ym_layout_root/app/AppWorkspaceView.m" "$ym_layout_root/app/InputLease.m" \
   "$ym_layout_root/app/DisplayProfileEditor.m" "$ym_layout_root/app/SavedDisplayProfilesView.m" \
+  "$ym_layout_root/app/WorkspacePreview.m" \
   "$ym_layout_root/bridge/VDVirtualDisplay.m" "$ym_layout_root/bridge/YMDisplayTopology.m" \
   -framework AppKit -framework CoreGraphics -framework IOKit -framework Carbon -framework ApplicationServices \
-  -framework QuartzCore -framework ColorSync \
+  -framework QuartzCore -framework ColorSync -framework ScreenCaptureKit -framework CoreMedia -framework CoreVideo -framework IOSurface \
   -F "$ym_layout_sparkle" -framework Sparkle "-Wl,-rpath,$ym_layout_sparkle" \
   -o "$ym_layout_stage/OverviewLayoutTests"
 "$ym_layout_stage/OverviewLayoutTests"

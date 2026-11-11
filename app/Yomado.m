@@ -21,6 +21,7 @@
 #import "DisplayProfileEditor.h"
 #import "SavedDisplayProfilesView.h"
 #import "InputLease.h"
+#import "WorkspacePreview.h"
 
 static NSString *YMAppVersion(void) {
     return [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"—";
@@ -176,6 +177,7 @@ static NSString *JSONText(id object) { return JSONTextWithIdentifiers(object, NO
 @property NSButton *addDisplayButton;
 @property YMAppWorkspace *appWorkspace;
 @property YMInputLeaseCenter *inputLeases;
+@property YMWorkspacePreview *workspacePreview;
 @property NSStackView *applicationCards;
 @property NSView *permissionContainer;
 @property NSMutableDictionary<NSNumber *, YMAppWorkspaceView *> *workspaceViews;
@@ -190,6 +192,7 @@ static NSString *JSONText(id object) { return JSONTextWithIdentifiers(object, NO
 @property(nonatomic) dispatch_queue_t topologyQueue;
 @property BOOL terminationAfterTopologyRecovery;
 @property BOOL appOperationInProgress;
+@property BOOL displayCommandHeadless; // a --display request is running: report failures in its reply, never in a dialog
 @property NSArray<NSDictionary *> *originalLayout;
 @property CGDirectDisplayID originalMain;
 @property NSArray<NSNumber *> *targets;
@@ -246,6 +249,9 @@ static NSString *JSONText(id object) { return JSONTextWithIdentifiers(object, NO
 - (void)updateSavedProfilesPresentation;
 - (void)restoreProfileEditorFocus;
 - (void)installPreviewProfilesForState:(NSString *)state;
+@end
+@interface ADController (YMDisplayCommands)
+- (void)startDisplayCommands;
 @end
 
 static OSStatus RecoveryHotkey(EventHandlerCallRef next, EventRef event, void *data) {
@@ -394,6 +400,7 @@ static os_log_t YMQuitLog(void) {
     }
 }
 - (BOOL)confirmLeavingUnmovableWindows:(NSString *)summary {
+    if (self.displayCommandHeadless) return NO; // never ask the person on an agent's behalf; keep the screen
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = @"有窗口无法挪回原位";
     alert.informativeText = [NSString stringWithFormat:@"%@多半是弹窗、启动画面或工具窗，yomado 无法可靠地把它们挪回原位。其他窗口照常返回原位。\n继续关闭后，macOS 会把这些窗口移到剩下的屏幕上，位置可能不同。", summary];
@@ -475,6 +482,8 @@ static os_log_t YMQuitLog(void) {
     [self buildWindow];
     self.inputLeases = [[YMInputLeaseCenter alloc] init];
     [self.inputLeases start];
+    [self startDisplayCommands];
+    self.workspacePreview = [[YMWorkspacePreview alloc] init];
     EventTypeSpec type = { kEventClassKeyboard, kEventHotKeyPressed };
     OSStatus handlerStatus = InstallEventHandler(GetApplicationEventTarget(), RecoveryHotkey, 1, &type,
                                                 (__bridge void *)self, &_keyHandler);
@@ -604,6 +613,9 @@ static os_log_t YMQuitLog(void) {
     }
     if (!active.count) [menu addItem:[[NSMenuItem alloc] initWithTitle:@"尚无运行中的虚拟屏" action:nil keyEquivalent:@""]];
     [menu addItem:[self menuItem:@"添加或启动虚拟屏…" action:@selector(showWindow:) profile:nil]];
+    NSMenuItem *preview = [self menuItem:@"在屏幕边缘预览虚拟屏" action:@selector(toggleWorkspacePreview:) profile:nil];
+    preview.state = self.workspacePreview.enabled ? NSControlStateValueOn : NSControlStateValueOff;
+    [menu addItem:preview];
     if (self.windowRecovery.needsRestoreBeforeRemovingVirtualDisplay)
         [menu addItem:[self menuItem:@"微信返回原显示器" action:@selector(wechatRestore:) profile:nil]];
     if (self.topologyRecoverySnapshot)
@@ -623,6 +635,11 @@ static os_log_t YMQuitLog(void) {
     }
     [menu addItem:NSMenuItem.separatorItem];
     [menu addItem:[self menuItem:@"完全退出 yomado" action:@selector(quit:) profile:nil]];
+}
+- (void)toggleWorkspacePreview:(id)sender {
+    (void)sender;
+    [self.workspacePreview setEnabled:!self.workspacePreview.enabled];
+    [self updateInventory];
 }
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
     if (item.action == @selector(checkForUpdates:))
@@ -1371,7 +1388,7 @@ static os_log_t YMQuitLog(void) {
 - (void)reportApplicationError:(NSError *)error fallback:(NSString *)fallback {
     self.detailLabel.stringValue = error.localizedDescription ?: fallback;
     self.statusLabel.stringValue = @"应用窗口操作未完成";
-    if (!self.previewMode && !self.window.attachedSheet) {
+    if (!self.previewMode && !self.displayCommandHeadless && !self.window.attachedSheet) {
         NSAlert *alert = [[NSAlert alloc] init];
         alert.messageText = @"未能移动窗口";
         alert.informativeText = self.detailLabel.stringValue;
@@ -1611,6 +1628,11 @@ static os_log_t YMQuitLog(void) {
             NSMutableArray *ids = [NSMutableArray array];
             for (YMManagedDisplay *profile in [self activeProfiles]) [ids addObject:@(profile.display.displayID)];
             [self.appWorkspace refreshWithVirtualDisplayIDs:ids displaySnapshot:snapshot];
+            NSMutableArray *previewDisplays = [NSMutableArray array];
+            for (YMManagedDisplay *profile in [self activeProfiles])
+                if (profile.topologyVerified)
+                    [previewDisplays addObject:@{@"displayID":@(profile.display.displayID), @"name":[self titleForProfile:profile]}];
+            [self.workspacePreview updateDisplays:previewDisplays];
             [self updateWeChatControls];
         }
         [self updateApplicationCardsWithSnapshot:snapshot];
@@ -2334,6 +2356,7 @@ static os_log_t YMQuitLog(void) {
     (void)notification;
     [self.panelPresenter invalidate];
     [self.inputLeases stop];
+    [self.workspacePreview invalidate];
     [NSNotificationCenter.defaultCenter removeObserver:self];
     [self.heartbeatTimer invalidate];
     if (self.hotkey) UnregisterEventHotKey(self.hotkey);
@@ -2604,6 +2627,251 @@ static int PreviewUI(NSString *path, NSString *state, BOOL dark) {
     return 0;
 }
 
+// MARK: - Display command line (`Yomado --display list|start|close`)
+// Lets an agent prepare its own named work screen without driving the panel.
+// Off by default: enable with `defaults write dev.chekusu.yomado YMDisplayCommandsEnabled -bool true`.
+// Requests travel on the same local distributed-notification bus as --input and
+// reuse the panel's own create/start/close paths, including topology checks and
+// window recovery on close. Moving windows stays with the agent's own tools.
+static NSString *const YMDisplayCommandRequestName = @"dev.chekusu.yomado.display.request";
+static NSString *const YMDisplayCommandResponseName = @"dev.chekusu.yomado.display.response";
+static NSString *const YMDisplayMarkName = @"dev.chekusu.yomado.display.mark";
+static NSString *const YMDisplayCommandObject = @"dev.chekusu.yomado";
+static NSString *const YMDisplayCommandsEnabledKey = @"YMDisplayCommandsEnabled";
+static const NSTimeInterval YMDisplayCommandSeconds = 45;
+
+@implementation ADController (YMDisplayCommands)
+- (void)startDisplayCommands {
+    [NSDistributedNotificationCenter.defaultCenter addObserver:self selector:@selector(displayCommandReceived:)
+        name:YMDisplayCommandRequestName object:YMDisplayCommandObject
+        suspensionBehavior:NSNotificationSuspensionBehaviorDeliverImmediately];
+    [NSDistributedNotificationCenter.defaultCenter addObserver:self selector:@selector(displayMarkReceived:)
+        name:YMDisplayMarkName object:YMDisplayCommandObject
+        suspensionBehavior:NSNotificationSuspensionBehaviorDeliverImmediately];
+}
+// An agent reports where it just acted so the person can follow along in the preview.
+- (void)displayMarkReceived:(NSNotification *)note {
+    if (![NSUserDefaults.standardUserDefaults boolForKey:YMDisplayCommandsEnabledKey]) return;
+    NSDictionary *info = [note.userInfo isKindOfClass:NSDictionary.class] ? note.userInfo : @{};
+    if (![info[@"x"] isKindOfClass:NSNumber.class] || ![info[@"y"] isKindOfClass:NSNumber.class]) return;
+    double x = [info[@"x"] doubleValue], y = [info[@"y"] doubleValue];
+    if (!isfinite(x) || !isfinite(y)) return;
+    [self.workspacePreview markPoint:CGPointMake(x, y)];
+}
+- (void)displayCommandRespond:(NSString *)requestID status:(NSString *)status extra:(NSDictionary *)extra {
+    NSMutableDictionary *info = [extra ?: @{} mutableCopy];
+    info[@"requestID"] = requestID;
+    info[@"status"] = status;
+    [NSDistributedNotificationCenter.defaultCenter postNotificationName:YMDisplayCommandResponseName
+        object:YMDisplayCommandObject userInfo:info options:NSDistributedNotificationDeliverImmediately];
+}
+- (NSDictionary *)displayCommandInfoForProfile:(YMManagedDisplay *)profile {
+    NSMutableDictionary *info = [@{@"name":profile.friendlyName ?: @"", @"ordinal":@(profile.ordinal),
+        @"width":@(profile.width), @"height":@(profile.height), @"hiDPI":@(profile.hiDPI),
+        @"running":@(profile.display.isCreated && profile.topologyVerified), @"starting":@(profile.starting)} mutableCopy];
+    if (profile.startFailureText.length) info[@"failure"] = profile.startFailureText;
+    // The person is driving this display from the preview; agents must pause.
+    info[@"takeover"] = @(profile.display.isCreated && [self.workspacePreview.takeoverDisplayID isEqual:@(profile.display.displayID)]);
+    if (profile.display.isCreated) {
+        CGDirectDisplayID ident = profile.display.displayID;
+        CGRect bounds = CGDisplayBounds(ident);
+        info[@"displayID"] = @(ident);
+        info[@"bounds"] = @{@"x":@(bounds.origin.x), @"y":@(bounds.origin.y), @"width":@(bounds.size.width), @"height":@(bounds.size.height)};
+    }
+    return info;
+}
+- (YMManagedDisplay *)displayCommandProfileNamed:(NSString *)name {
+    for (YMManagedDisplay *profile in self.displayProfiles)
+        if ([profile.friendlyName isEqualToString:name]) return profile;
+    return nil;
+}
+- (void)displayCommandReceived:(NSNotification *)note {
+    NSDictionary *info = [note.userInfo isKindOfClass:NSDictionary.class] ? note.userInfo : @{};
+    NSString *requestID = [info[@"requestID"] isKindOfClass:NSString.class] ? info[@"requestID"] : nil;
+    if (requestID.length == 0 || requestID.length > 64) return;
+    if (![NSUserDefaults.standardUserDefaults boolForKey:YMDisplayCommandsEnabledKey]) {
+        [self displayCommandRespond:requestID status:@"disabled"
+            extra:@{@"message":@"Display commands are off. Enable with: defaults write dev.chekusu.yomado YMDisplayCommandsEnabled -bool true"}];
+        return;
+    }
+    NSString *action = [info[@"action"] isKindOfClass:NSString.class] ? info[@"action"] : @"";
+    NSString *name = [info[@"name"] isKindOfClass:NSString.class] ? info[@"name"] : @"";
+    if ([action isEqualToString:@"list"]) {
+        NSMutableArray *displays = [NSMutableArray array];
+        for (YMManagedDisplay *profile in self.displayProfiles) [displays addObject:[self displayCommandInfoForProfile:profile]];
+        [self.appWorkspace refreshInventory];
+        [self displayCommandList:displays requestID:requestID deadline:[NSDate dateWithTimeIntervalSinceNow:1.5]];
+        return;
+    }
+    if (name.length == 0 || name.length > 64) {
+        [self displayCommandRespond:requestID status:@"failed" extra:@{@"message":@"--name is required (1-64 characters)."}];
+        return;
+    }
+    YMManagedDisplay *profile = [self displayCommandProfileNamed:name];
+    if ([action isEqualToString:@"start"]) {
+        if (profile.display.isCreated && profile.topologyVerified) {
+            [self displayCommandRespond:requestID status:@"running" extra:@{@"display":[self displayCommandInfoForProfile:profile]}];
+            return;
+        }
+        if (![self profileActionsAvailableForEditor:nil]) {
+            [self displayCommandRespond:requestID status:@"busy" extra:@{@"message":@"Another display or window operation is in progress."}];
+            return;
+        }
+        if (!profile) {
+            NSUInteger width = [info[@"width"] unsignedIntegerValue] == 2560 ? 2560 : 1920;
+            BOOL hiDPI = info[@"hiDPI"] ? [info[@"hiDPI"] boolValue] : YES;
+            NSUInteger next = 1;
+            for (YMManagedDisplay *existing in self.displayProfiles) next = MAX(next, existing.ordinal + 1);
+            profile = [self newProfileWithOrdinal:next name:name width:width height:width == 2560 ? 1440 : 1080 hiDPI:hiDPI];
+            [self.displayProfiles addObject:profile];
+            [self saveDisplayProfiles];
+        }
+        profile.startFailureText = nil;
+        [self selectProfile:profile];
+        if (self.selectedProfile == profile) [self createSelectedProfilePersistingOnSuccess:NO];
+        [self displayCommandAwait:profile requestID:requestID running:YES deadline:[NSDate dateWithTimeIntervalSinceNow:YMDisplayCommandSeconds - 5]];
+        return;
+    }
+    if ([action isEqualToString:@"close"]) {
+        if (!profile || !profile.display.isCreated) {
+            [self displayCommandRespond:requestID status:@"closed" extra:@{@"message":@"Display is not running."}];
+            return;
+        }
+        if (![self canPerformScreenMenuActionForProfile:profile]) {
+            [self displayCommandRespond:requestID status:@"busy" extra:@{@"message":@"Another display or window operation is in progress."}];
+            return;
+        }
+        [self selectProfile:profile];
+        if (self.selectedProfile != profile) {
+            [self displayCommandRespond:requestID status:@"busy" extra:@{@"message":@"Could not select the display."}];
+            return;
+        }
+        [self displayCommandClose:profile requestID:requestID deadline:[NSDate dateWithTimeIntervalSinceNow:YMDisplayCommandSeconds - 5]];
+        return;
+    }
+    [self displayCommandRespond:requestID status:@"failed" extra:@{@"message":@"Unknown action. Use list, start or close."}];
+}
+// refreshInventory finishes asynchronously when the window set changed, so give
+// it a moment to publish before reporting; "ready" may still be false after that,
+// and agents poll list until it is true before closing.
+- (void)displayCommandList:(NSArray *)displays requestID:(NSString *)requestID deadline:(NSDate *)deadline {
+    if (!self.appWorkspace.inventoryReady && deadline.timeIntervalSinceNow > 0) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self displayCommandList:displays requestID:requestID deadline:deadline];
+        });
+        return;
+    }
+    NSDictionary *inventory = @{@"ready":@(self.appWorkspace.inventoryReady),
+        @"accessibilityTrusted":@(self.appWorkspace.accessibilityTrusted), @"status":self.appWorkspace.statusText ?: @""};
+    [self displayCommandRespond:requestID status:@"ok" extra:@{@"displays":displays, @"inventory":inventory}];
+}
+// Window lists settle a moment after an agent closes its windows: wait for a
+// verified inventory first. The close itself runs without dialogs; a refusal
+// is detected as soon as stop: returns and reported in the reply right away.
+- (void)displayCommandClose:(YMManagedDisplay *)profile requestID:(NSString *)requestID deadline:(NSDate *)deadline {
+    [self.appWorkspace refreshInventory];
+    BOOL ready = [self.appWorkspace inventoryReadyForClosingDisplayID:profile.display.displayID];
+    if (!ready && deadline.timeIntervalSinceNow > 10) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self displayCommandClose:profile requestID:requestID deadline:deadline];
+        });
+        return;
+    }
+    // Some early returns in stop: leave detailLabel alone; clear it so a refusal
+    // never reports an earlier operation's message.
+    self.detailLabel.stringValue = @"";
+    self.displayCommandHeadless = YES;
+    @try { [self stop:nil]; } @finally { self.displayCommandHeadless = NO; }
+    if (profile.display.isCreated && !self.displayOperationInProgress) {
+        [self displayCommandRespond:requestID status:@"failed"
+            extra:@{@"message":self.detailLabel.stringValue.length ? self.detailLabel.stringValue : @"Display was kept: another operation is in progress, or its windows could not be verified.",
+                    @"inventoryReady":@(ready)}];
+        return;
+    }
+    [self displayCommandAwait:profile requestID:requestID running:NO deadline:deadline];
+}
+- (void)displayCommandAwait:(YMManagedDisplay *)profile requestID:(NSString *)requestID running:(BOOL)wantRunning deadline:(NSDate *)deadline {
+    BOOL running = profile.display.isCreated && profile.topologyVerified;
+    if (wantRunning && running) {
+        [self displayCommandRespond:requestID status:@"running" extra:@{@"display":[self displayCommandInfoForProfile:profile]}];
+        return;
+    }
+    if (!wantRunning && !profile.display.isCreated) {
+        [self displayCommandRespond:requestID status:@"closed" extra:@{@"display":[self displayCommandInfoForProfile:profile]}];
+        return;
+    }
+    if (wantRunning && !profile.starting && !self.displayOperationInProgress && profile.startFailureText.length) {
+        [self displayCommandRespond:requestID status:@"failed" extra:@{@"message":profile.startFailureText}];
+        return;
+    }
+    if (deadline.timeIntervalSinceNow <= 0) {
+        [self displayCommandRespond:requestID status:@"failed"
+            extra:@{@"message":wantRunning ? @"Display did not start in time." : @"Display did not close; windows may still need to return. Use the panel."}];
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self displayCommandAwait:profile requestID:requestID running:wantRunning deadline:deadline];
+    });
+}
+@end
+
+static int YMDisplayCommandUsage(void) {
+    fprintf(stderr, "Usage: Yomado --display list\n"
+                    "       Yomado --display start --name <name> [--width 1920|2560] [--hidpi 1|0]\n"
+                    "       Yomado --display close --name <name>\n"
+                    "       Yomado --display mark --x <x> --y <y>\n");
+    return 64;
+}
+
+static int YMDisplayCommand(int argc, const char *argv[]) {
+    @autoreleasepool {
+        if (argc < 3) return YMDisplayCommandUsage();
+        NSString *action = [NSString stringWithUTF8String:argv[2]];
+        if ([action isEqualToString:@"mark"]) {
+            // One-way: Yomado --display mark --x <x> --y <y>   (global desktop points, origin top-left)
+            if (argc != 7 || strcmp(argv[3], "--x") || strcmp(argv[5], "--y")) return YMDisplayCommandUsage();
+            [NSDistributedNotificationCenter.defaultCenter postNotificationName:YMDisplayMarkName object:YMDisplayCommandObject
+                userInfo:@{@"x":@(atof(argv[4])), @"y":@(atof(argv[6]))} options:NSDistributedNotificationDeliverImmediately];
+            return 0;
+        }
+        if (![@[@"list", @"start", @"close"] containsObject:action]) return YMDisplayCommandUsage();
+        NSMutableDictionary *message = [@{@"action":action} mutableCopy];
+        for (int index = 3; index < argc; index += 2) {
+            if (index + 1 >= argc) return YMDisplayCommandUsage();
+            NSString *key = [NSString stringWithUTF8String:argv[index]];
+            NSString *value = [NSString stringWithUTF8String:argv[index + 1]];
+            if ([key isEqualToString:@"--name"]) message[@"name"] = value;
+            else if ([key isEqualToString:@"--width"]) message[@"width"] = @(value.integerValue);
+            else if ([key isEqualToString:@"--hidpi"]) message[@"hiDPI"] = @(value.boolValue);
+            else return YMDisplayCommandUsage();
+        }
+        if (![action isEqualToString:@"list"] && ![message[@"name"] length]) return YMDisplayCommandUsage();
+        NSString *requestID = NSUUID.UUID.UUIDString.lowercaseString;
+        message[@"requestID"] = requestID;
+        __block NSDictionary *reply = nil;
+        id token = [NSDistributedNotificationCenter.defaultCenter addObserverForName:YMDisplayCommandResponseName
+            object:YMDisplayCommandObject queue:nil usingBlock:^(NSNotification *note) {
+                if ([note.userInfo[@"requestID"] isEqual:requestID]) reply = note.userInfo;
+            }];
+        [NSDistributedNotificationCenter.defaultCenter postNotificationName:YMDisplayCommandRequestName
+            object:YMDisplayCommandObject userInfo:message options:NSDistributedNotificationDeliverImmediately];
+        NSDate *start = NSDate.date;
+        while (!reply && -start.timeIntervalSinceNow < YMDisplayCommandSeconds) {
+            @autoreleasepool { [NSRunLoop.currentRunLoop runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.1]]; }
+            if (!reply && -start.timeIntervalSinceNow > 3 && ![NSRunningApplication runningApplicationsWithBundleIdentifier:@"dev.chekusu.yomado"].count) break;
+        }
+        [NSDistributedNotificationCenter.defaultCenter removeObserver:token];
+        NSMutableDictionary *result = reply ? [reply mutableCopy] : [@{@"status":@"not-running"} mutableCopy];
+        [result removeObjectForKey:@"requestID"];
+        NSData *data = [NSJSONSerialization dataWithJSONObject:result options:NSJSONWritingSortedKeys error:nil];
+        printf("%s\n", [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding].UTF8String);
+        NSString *status = result[@"status"];
+        if ([@[@"ok", @"running", @"closed"] containsObject:status]) return 0;
+        return [status isEqualToString:@"not-running"] ? 3 : 2;
+    }
+}
+
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if (argc > 1 && strcmp(argv[1], "--preview-ui") == 0) {
@@ -2625,6 +2893,7 @@ int main(int argc, const char *argv[]) {
             return 0;
         }
         if (argc > 1 && strcmp(argv[1], "--input") == 0) return YMInputLeaseCommand(argc, argv);
+        if (argc > 1 && strcmp(argv[1], "--display") == 0) return YMDisplayCommand(argc, argv);
         if (argc > 2 && strcmp(argv[1], "--self-test") == 0)
             return SelfTest([NSString stringWithUTF8String:argv[2]], argc > 3 && strcmp(argv[3], "hidpi") == 0);
         if (argc > 3 && strcmp(argv[1], "--watchdog-test") == 0)

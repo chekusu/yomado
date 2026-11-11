@@ -51,6 +51,7 @@ FOUNDATION_EXPORT NSString * const YMAppWorkspaceErrorDomain;
 - (BOOL)restoreAll:(NSError * _Nullable * _Nullable)error;
 - (BOOL)needsRestoreForDisplayID:(CGDirectDisplayID)displayID;
 - (BOOL)inventoryReadyForClosingDisplayID:(CGDirectDisplayID)displayID;
+- (void)refreshInventory;
 // Before closing a display: per-app counts ({appName, count}) of visible
 // windows that cannot be matched to a movable ordinary window, such as
 // dialogs, splash screens and tool windows. nil means evidence is pending or
