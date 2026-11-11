@@ -111,7 +111,10 @@ static void YMAddRipple(CALayer *host, CGPoint at, CGFloat radius) {
     configuration.height = (size_t)llround((double)width / aspect);
     configuration.minimumFrameInterval = live ? CMTimeMake(1, 30) : CMTimeMake(1, 2);
     configuration.queueDepth = 3;
-    configuration.showsCursor = YES;
+    // Never composite the pointer into the capture: while any stream asks for
+    // it, the pointer is drawn in software on every display and the person's
+    // trackpad feels heavy. Agents and take-over never use the pointer.
+    configuration.showsCursor = NO;
     configuration.pixelFormat = kCVPixelFormatType_32BGRA;
     return configuration;
 }
