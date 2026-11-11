@@ -190,6 +190,7 @@ static NSString *JSONText(id object) { return JSONTextWithIdentifiers(object, NO
 @property(nonatomic) dispatch_queue_t topologyQueue;
 @property BOOL terminationAfterTopologyRecovery;
 @property BOOL appOperationInProgress;
+@property BOOL displayCommandHeadless; // a --display request is running: report failures in its reply, never in a dialog
 @property NSArray<NSDictionary *> *originalLayout;
 @property CGDirectDisplayID originalMain;
 @property NSArray<NSNumber *> *targets;
@@ -397,6 +398,7 @@ static os_log_t YMQuitLog(void) {
     }
 }
 - (BOOL)confirmLeavingUnmovableWindows:(NSString *)summary {
+    if (self.displayCommandHeadless) return NO; // never ask the person on an agent's behalf; keep the screen
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = @"有窗口无法挪回原位";
     alert.informativeText = [NSString stringWithFormat:@"%@多半是弹窗、启动画面或工具窗，yomado 无法可靠地把它们挪回原位。其他窗口照常返回原位。\n继续关闭后，macOS 会把这些窗口移到剩下的屏幕上，位置可能不同。", summary];
@@ -1375,7 +1377,7 @@ static os_log_t YMQuitLog(void) {
 - (void)reportApplicationError:(NSError *)error fallback:(NSString *)fallback {
     self.detailLabel.stringValue = error.localizedDescription ?: fallback;
     self.statusLabel.stringValue = @"应用窗口操作未完成";
-    if (!self.previewMode && !self.window.attachedSheet) {
+    if (!self.previewMode && !self.displayCommandHeadless && !self.window.attachedSheet) {
         NSAlert *alert = [[NSAlert alloc] init];
         alert.messageText = @"未能移动窗口";
         alert.informativeText = self.detailLabel.stringValue;
@@ -2666,9 +2668,7 @@ static const NSTimeInterval YMDisplayCommandSeconds = 45;
         NSMutableArray *displays = [NSMutableArray array];
         for (YMManagedDisplay *profile in self.displayProfiles) [displays addObject:[self displayCommandInfoForProfile:profile]];
         [self.appWorkspace refreshInventory];
-        NSDictionary *inventory = @{@"ready":@(self.appWorkspace.inventoryReady),
-            @"accessibilityTrusted":@(self.appWorkspace.accessibilityTrusted), @"status":self.appWorkspace.statusText ?: @""};
-        [self displayCommandRespond:requestID status:@"ok" extra:@{@"displays":displays, @"inventory":inventory}];
+        [self displayCommandList:displays requestID:requestID deadline:[NSDate dateWithTimeIntervalSinceNow:1.5]];
         return;
     }
     if (name.length == 0 || name.length > 64) {
@@ -2710,11 +2710,50 @@ static const NSTimeInterval YMDisplayCommandSeconds = 45;
             return;
         }
         [self selectProfile:profile];
-        if (self.selectedProfile == profile) [self stop:nil];
-        [self displayCommandAwait:profile requestID:requestID running:NO deadline:[NSDate dateWithTimeIntervalSinceNow:YMDisplayCommandSeconds - 5]];
+        if (self.selectedProfile != profile) {
+            [self displayCommandRespond:requestID status:@"busy" extra:@{@"message":@"Could not select the display."}];
+            return;
+        }
+        [self displayCommandClose:profile requestID:requestID deadline:[NSDate dateWithTimeIntervalSinceNow:YMDisplayCommandSeconds - 5]];
         return;
     }
     [self displayCommandRespond:requestID status:@"failed" extra:@{@"message":@"Unknown action. Use list, start or close."}];
+}
+// refreshInventory finishes asynchronously when the window set changed, so give
+// it a moment to publish before reporting; "ready" may still be false after that,
+// and agents poll list until it is true before closing.
+- (void)displayCommandList:(NSArray *)displays requestID:(NSString *)requestID deadline:(NSDate *)deadline {
+    if (!self.appWorkspace.inventoryReady && deadline.timeIntervalSinceNow > 0) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self displayCommandList:displays requestID:requestID deadline:deadline];
+        });
+        return;
+    }
+    NSDictionary *inventory = @{@"ready":@(self.appWorkspace.inventoryReady),
+        @"accessibilityTrusted":@(self.appWorkspace.accessibilityTrusted), @"status":self.appWorkspace.statusText ?: @""};
+    [self displayCommandRespond:requestID status:@"ok" extra:@{@"displays":displays, @"inventory":inventory}];
+}
+// Window lists settle a moment after an agent closes its windows: wait for a
+// verified inventory first. The close itself runs without dialogs; a refusal
+// is detected as soon as stop: returns and reported in the reply right away.
+- (void)displayCommandClose:(YMManagedDisplay *)profile requestID:(NSString *)requestID deadline:(NSDate *)deadline {
+    [self.appWorkspace refreshInventory];
+    BOOL ready = [self.appWorkspace inventoryReadyForClosingDisplayID:profile.display.displayID];
+    if (!ready && deadline.timeIntervalSinceNow > 10) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self displayCommandClose:profile requestID:requestID deadline:deadline];
+        });
+        return;
+    }
+    self.displayCommandHeadless = YES;
+    @try { [self stop:nil]; } @finally { self.displayCommandHeadless = NO; }
+    if (profile.display.isCreated && !self.displayOperationInProgress) {
+        [self displayCommandRespond:requestID status:@"failed"
+            extra:@{@"message":self.detailLabel.stringValue.length ? self.detailLabel.stringValue : @"Display was kept; windows could not be verified.",
+                    @"inventoryReady":@(ready)}];
+        return;
+    }
+    [self displayCommandAwait:profile requestID:requestID running:NO deadline:deadline];
 }
 - (void)displayCommandAwait:(YMManagedDisplay *)profile requestID:(NSString *)requestID running:(BOOL)wantRunning deadline:(NSDate *)deadline {
     BOOL running = profile.display.isCreated && profile.topologyVerified;
