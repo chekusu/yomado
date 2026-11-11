@@ -2745,11 +2745,14 @@ static const NSTimeInterval YMDisplayCommandSeconds = 45;
         });
         return;
     }
+    // Some early returns in stop: leave detailLabel alone; clear it so a refusal
+    // never reports an earlier operation's message.
+    self.detailLabel.stringValue = @"";
     self.displayCommandHeadless = YES;
     @try { [self stop:nil]; } @finally { self.displayCommandHeadless = NO; }
     if (profile.display.isCreated && !self.displayOperationInProgress) {
         [self displayCommandRespond:requestID status:@"failed"
-            extra:@{@"message":self.detailLabel.stringValue.length ? self.detailLabel.stringValue : @"Display was kept; windows could not be verified.",
+            extra:@{@"message":self.detailLabel.stringValue.length ? self.detailLabel.stringValue : @"Display was kept: another operation is in progress, or its windows could not be verified.",
                     @"inventoryReady":@(ready)}];
         return;
     }
