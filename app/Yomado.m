@@ -10,6 +10,7 @@
 #import "LayoutPolicy.h"
 #import "DiagnosticPrivacy.h"
 #import "ControlUI.h"
+#import "PhysicalFocus.h"
 #import "WindowRecovery.h"
 #import "AppWorkspace.h"
 #import "AppWorkspacePolicy.h"
@@ -176,6 +177,7 @@ static NSString *JSONText(id object) { return JSONTextWithIdentifiers(object, NO
 @property NSButton *addDisplayButton;
 @property YMAppWorkspace *appWorkspace;
 @property YMInputLeaseCenter *inputLeases;
+@property YMPhysicalFocusGuard *physicalFocus;
 @property NSStackView *applicationCards;
 @property NSView *permissionContainer;
 @property NSMutableDictionary<NSNumber *, YMAppWorkspaceView *> *workspaceViews;
@@ -475,6 +477,8 @@ static os_log_t YMQuitLog(void) {
     [self buildWindow];
     self.inputLeases = [[YMInputLeaseCenter alloc] init];
     [self.inputLeases start];
+    self.physicalFocus = [[YMPhysicalFocusGuard alloc] init];
+    [self.physicalFocus start];
     EventTypeSpec type = { kEventClassKeyboard, kEventHotKeyPressed };
     OSStatus handlerStatus = InstallEventHandler(GetApplicationEventTarget(), RecoveryHotkey, 1, &type,
                                                 (__bridge void *)self, &_keyHandler);
@@ -2334,6 +2338,7 @@ static os_log_t YMQuitLog(void) {
     (void)notification;
     [self.panelPresenter invalidate];
     [self.inputLeases stop];
+    [self.physicalFocus stop];
     [NSNotificationCenter.defaultCenter removeObserver:self];
     [self.heartbeatTimer invalidate];
     if (self.hotkey) UnregisterEventHotKey(self.hotkey);

@@ -133,6 +133,15 @@ yomado shows the request on the main screen with **允许** and **拒绝**; an u
 
 yomado does not post input itself and cannot block an agent's tool. The lease is a permission and a visible notice: the [yomado skill](skills/yomado/SKILL.md) tells agents to check it before each batch of real input and to stop when it ends.
 
+## Keep your windows on your screens
+
+Off by default: `defaults write dev.chekusu.yomado YMKeepFocusOnPhysicalDisplays -bool true`. While a virtual display is running, yomado checks once a second (skipping while a mouse button is down):
+
+- When a window arrives on a virtual display, the app's front window on a physical display becomes its main window again, without activating the app. Apps open new documents in their last active window; without this, Chrome's next `open page.html` becomes a tab on the virtual display.
+- When the front app's focused window is on a virtual display, you just switched to it (Dock, Command-Tab, `open`, a notification) and can't see it, so it moves to the physical display under the pointer, keeping its size.
+
+Leave it off if you work on a virtual display yourself, for example through screen sharing: the second rule moves the window you're using there back to a physical display. Needs Accessibility.
+
 ## Version and updates
 
 The panel footer links to [yomado.app](https://yomado.app/), this GitHub repository and the MIT license, alongside the installed version. Click the refresh icon next to the version, or **Check and Install Updates…** (`检查并安装更新…`) in the menu-bar menu. The menu bar uses a transparent, monochrome silhouette of the night-window logo that follows the system appearance; the full app icon keeps its dark background.

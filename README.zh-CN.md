@@ -139,6 +139,15 @@ yomado 会在主屏弹出申请，提供「允许」和「拒绝」；60 秒内�
 
 yomado 自己不发送输入，也无法拦住 Agent 的工具。借用只是一种许可加可见提示：[yomado skill](skills/yomado/SKILL.md) 要求 Agent 每批真实输入前都检查一次，借用结束就立即停下。
 
+## 让你的窗口留在你看得见的屏幕上
+
+默认关闭：`defaults write dev.chekusu.yomado YMKeepFocusOnPhysicalDisplays -bool true`。有虚拟屏运行时，yomado 每秒检查一次（按住鼠标时跳过）：
+
+- 有窗口进入虚拟屏时，把该 App 在实体屏上最前面的窗口重新设为主窗口，不激活该 App。App 会把新文档开在最近活动的窗口里；不这样做，Chrome 下一次 `open page.html` 会变成虚拟屏上的一个标签页。
+- 前台 App 的焦点窗口在虚拟屏上时，说明你刚切到它（Dock、Command-Tab、`open`、通知），但看不见它，于是把它挪到指针所在的实体屏，保持大小。
+
+如果你自己在虚拟屏上工作（比如通过屏幕共享），请保持关闭：第二条会把你正在用的窗口挪回实体屏。需要辅助功能权限。
+
 ## 版本与检查更新
 
 面板底部显示当前版本，并提供 [yomado.app](https://yomado.app/)、GitHub 源码和 MIT 协议入口。点击版本旁的刷新图标，或菜单栏菜单中的「检查并安装更新…」。菜单栏只保留夜窗 logo 的窗子轮廓，背景透明、颜色跟随系统外观；应用图标仍保留完整深色底图。
