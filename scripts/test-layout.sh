@@ -40,7 +40,7 @@ ym_layout_sparkle="$("$ym_layout_root/scripts/fetch-sparkle.sh")"
   "$ym_layout_root/app/ControlUI.m" "$ym_layout_root/app/WindowRecovery.m" \
   "$ym_layout_root/app/UpdateChecker.m" "$ym_layout_root/app/MenuBarIcon.m" "$ym_layout_root/app/PanelPresentation.m" \
   "$ym_layout_root/app/AutomaticUpdater.m" "$ym_layout_root/app/UpdateWorkspaceRecovery.m" \
-  "$ym_layout_root/app/AppWorkspace.m" "$ym_layout_root/app/AppWorkspaceAccess.m" \
+  "$ym_layout_root/app/AppWorkspace.m" "$ym_layout_root/app/AppWorkspaceAccess.m" "$ym_layout_root/app/PhysicalFocus.m" \
   "$ym_layout_root/app/AppWorkspaceView.m" "$ym_layout_root/app/InputLease.m" \
   "$ym_layout_root/app/DisplayProfileEditor.m" "$ym_layout_root/app/SavedDisplayProfilesView.m" \
   "$ym_layout_root/bridge/VDVirtualDisplay.m" "$ym_layout_root/bridge/YMDisplayTopology.m" \
