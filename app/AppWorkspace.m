@@ -58,6 +58,7 @@ static const NSUInteger kYMInventoryMaxCGCandidates = 512;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSArray *> *offeredUnmovableWindows;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSArray *> *allowedUnmovableWindows;
 @property(nonatomic) CGDirectDisplayID closingDisplayID;
+@property(nonatomic) NSUInteger closeTransactionDepth;
 @end
 
 @implementation YMAppWorkspace
@@ -561,7 +562,7 @@ static const NSUInteger kYMInventoryMaxCGCandidates = 512;
     return tokens;
 }
 - (BOOL)unmovableTokenIsAllowed:(NSDictionary *)token displayID:(CGDirectDisplayID)ID {
-    return token && [token[@"displayID"] unsignedIntValue] == ID &&
+    return self.closeTransactionDepth && token && [token[@"displayID"] unsignedIntValue] == ID &&
         [self.allowedUnmovableWindows[@(ID)] containsObject:token];
 }
 - (NSDictionary *)snapshot:(NSDictionary *)snapshot excludingUnmovableTokens:(NSArray *)tokens {
@@ -881,6 +882,13 @@ static const NSUInteger kYMInventoryMaxCGCandidates = 512;
              ![self displayStillCurrent:[self display:ID]])) return NO;
     return YES;
 }
+- (void)beginCloseTransaction {
+    if (self.closeTransactionDepth++ == 0) [self cancelUnmovableWindowAllowances];
+}
+- (void)endCloseTransaction {
+    if (self.closeTransactionDepth && --self.closeTransactionDepth == 0)
+        [self cancelUnmovableWindowAllowances];
+}
 - (NSArray<NSDictionary *> *)unmovableWindowsForDisplayID:(CGDirectDisplayID)ID {
     NSAssert(NSThread.isMainThread, @"App workspace is main-thread only.");
     if (![self.ownedIDs containsObject:@(ID)]) return @[];
@@ -900,7 +908,7 @@ static const NSUInteger kYMInventoryMaxCGCandidates = 512;
 }
 - (void)allowUnmovableWindowsOnDisplayID:(CGDirectDisplayID)ID {
     NSAssert(NSThread.isMainThread, @"App workspace is main-thread only.");
-    if ([self.ownedIDs containsObject:@(ID)] && self.offeredUnmovableWindows[@(ID)]) {
+    if (self.closeTransactionDepth && [self.ownedIDs containsObject:@(ID)] && self.offeredUnmovableWindows[@(ID)]) {
         self.allowedUnmovableWindows[@(ID)] = self.offeredUnmovableWindows[@(ID)];
         // A modal prompt can outlive the inventory; verify its exact identities
         // again rather than approving whatever appeared while it was open.
@@ -984,7 +992,7 @@ static const NSUInteger kYMInventoryMaxCGCandidates = 512;
     }
 
     NSDictionary *snapshot = YMWorkspaceNormalizeWindowSnapshot(cgForApp, axWindows, YES, self.displays);
-    if (self.closingDisplayID && filter.unsignedIntValue == self.closingDisplayID)
+    if (self.closeTransactionDepth && self.closingDisplayID && filter.unsignedIntValue == self.closingDisplayID)
         snapshot = [self snapshot:snapshot excludingUnmovableTokens:self.allowedUnmovableWindows[filter] ?: @[]];
     if (!YMWorkspaceSnapshotAllowsSource(snapshot, filter)) {
         [self fail:error code:7 text:@"部分窗口无法可靠匹配或移动。请关闭弹窗、展开普通窗口后重试；尚未继续移屏。"];

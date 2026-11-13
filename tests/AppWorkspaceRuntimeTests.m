@@ -573,11 +573,39 @@ static YMWorkspaceFixture *UnmovableFixture(YMFakeWindowAccess **outAccess, NSDi
     YMWorkspaceFixture *workspace = [[YMWorkspaceFixture alloc] initWithWindowAccess:access];
     [workspace refreshWithVirtualDisplayIDs:@[@8, @9] displaySnapshot:RuntimeDisplays()];
     [workspace drainReads];
+    [workspace beginCloseTransaction];
     *outAccess = access;
     return workspace;
 }
 
 static void UnmovableCloseChecks(void) {
+    {
+        YMFakeWindowAccess *access;
+        YMWorkspaceFixture *workspace = UnmovableFixture(&access, @{@"ordinary": @NO});
+        (void)[workspace unmovableWindowsForDisplayID:8];
+        [workspace allowUnmovableWindowsOnDisplayID:8];
+        [workspace drainReads];
+        Check([workspace inventoryReadyForClosingDisplayID:8], @"transaction permits its exact confirmed identity");
+        [workspace beginCloseTransaction];
+        [workspace endCloseTransaction];
+        Check([workspace inventoryReadyForClosingDisplayID:8], @"nested stop keeps enclosing quit consent");
+        [workspace endCloseTransaction];
+        Check(![workspace inventoryReadyForClosingDisplayID:8], @"outer transaction revokes consent after failed or asynchronous close");
+        Check([[workspace valueForKey:@"offeredUnmovableWindows"] count] == 0, @"transaction exit drops offered identities");
+        (void)[workspace unmovableWindowsForDisplayID:8];
+        [workspace allowUnmovableWindowsOnDisplayID:8];
+        [workspace drainReads];
+        Check(![workspace inventoryReadyForClosingDisplayID:8], @"out-of-transaction offer cannot authorize close");
+        [workspace beginCloseTransaction];
+        [workspace allowUnmovableWindowsOnDisplayID:8];
+        Check(![workspace inventoryReadyForClosingDisplayID:8], @"new transaction cannot reuse old offered identities");
+        Check([workspace unmovableWindowsForDisplayID:8].count == 1, @"retry prompts again for unchanged unmovable window");
+        [workspace allowUnmovableWindowsOnDisplayID:8];
+        [workspace drainReads];
+        Check([workspace inventoryReadyForClosingDisplayID:8], @"retry can confirm a freshly offered identity");
+        [workspace endCloseTransaction];
+        Check(access.writeCount == 0, @"transaction consent tests never move windows");
+    }
     for (id absentUUID in @[NSNull.null, @""]) {
         YMFakeWindowAccess *access;
         YMWorkspaceFixture *workspace = UnmovableFixture(&access, @{@"ordinary": @NO});

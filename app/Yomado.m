@@ -349,8 +349,8 @@ static os_log_t YMQuitLog(void) {
     return quitLog;
 }
 - (void)logQuitStep:(NSString *)step {
-    os_log(YMQuitLog(), "%{public}@ | status: %{public}@ | detail: %{public}@", step,
-        self.statusLabel.stringValue ?: @"", self.detailLabel.stringValue ?: @"");
+    // Call sites pass fixed events and numeric IDs/counts, never user text.
+    os_log(YMQuitLog(), "%{public}@", step);
 }
 - (NSApplicationTerminateReply)refuseTermination:(NSString *)reason {
     [self logQuitStep:[@"quit refused: " stringByAppendingString:reason]];
@@ -381,7 +381,7 @@ static os_log_t YMQuitLog(void) {
     }
     NSString *summary = YMWorkspaceUnmovableSummary(items);
     if (!summary.length) return YES;
-    [self logQuitStep:[@"windows that cannot return: " stringByAppendingString:summary]];
+    [self logQuitStep:@"unmovable window confirmation required"];
     if (![self confirmLeavingUnmovableWindows:summary]) {
         [self.appWorkspace cancelUnmovableWindowAllowances];
         [self logQuitStep:@"user kept the screens because of windows that cannot return"];
@@ -403,7 +403,7 @@ static os_log_t YMQuitLog(void) {
     // not leave windows behind; only an explicit click on 继续关闭 does.
     alert.buttons.firstObject.keyEquivalent = @"";
     alert.buttons.lastObject.keyEquivalent = @"\r";
-    [self showWindow:nil];
+    // A canceled confirmation must not reopen or relocate the control panel.
     return [alert runModal] == NSAlertFirstButtonReturn;
 }
 - (void)resumeTerminationAfterTopologyRecovery:(BOOL)recovered {
@@ -2191,6 +2191,12 @@ static os_log_t YMQuitLog(void) {
 
 }
 - (void)stop:(id)sender {
+    BOOL scoped = [self.appWorkspace respondsToSelector:@selector(beginCloseTransaction)];
+    if (scoped) [self.appWorkspace beginCloseTransaction];
+    @try { [self stopInCloseTransaction:sender]; }
+    @finally { if (scoped) [self.appWorkspace endCloseTransaction]; }
+}
+- (void)stopInCloseTransaction:(id)sender {
     (void)sender;
     if (self.previewMode) return;
     if (self.updateWorkspaceBusy || self.displayOperationInProgress || self.appOperationInProgress) {
@@ -2267,6 +2273,12 @@ static os_log_t YMQuitLog(void) {
     [NSApp terminate:nil];
 }
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
+    BOOL scoped = [self.appWorkspace respondsToSelector:@selector(beginCloseTransaction)];
+    if (scoped) [self.appWorkspace beginCloseTransaction];
+    @try { return [self applicationShouldTerminateInCloseTransaction:sender]; }
+    @finally { if (scoped) [self.appWorkspace endCloseTransaction]; }
+}
+- (NSApplicationTerminateReply)applicationShouldTerminateInCloseTransaction:(NSApplication *)sender {
     if (self.previewMode) return NSTerminateNow;
     (void)sender;
     if (self.automaticUpdater.installationPending) {
