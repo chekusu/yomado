@@ -133,6 +133,18 @@ yomado shows the request on the main screen with **允许** and **拒绝**; an u
 
 yomado does not post input itself and cannot block an agent's tool. The lease is a permission and a visible notice: the [yomado skill](skills/yomado/SKILL.md) tells agents to check it before each batch of real input and to stop when it ends.
 
+## Let an agent manage its own screen
+
+Off by default. Enable it once with `defaults write dev.chekusu.yomado YMDisplayCommandsEnabled -bool true`; while it is off, every request answers `disabled`. Like `--input`, the commands travel on a local notification bus, so once enabled any process running as you can list, start or close yomado's screens.
+
+```sh
+./dist/Yomado.app/Contents/MacOS/Yomado --display list
+./dist/Yomado.app/Contents/MacOS/Yomado --display start --name "Claude" [--width 1920|2560] [--hidpi 1|0]
+./dist/Yomado.app/Contents/MacOS/Yomado --display close --name "Claude"
+```
+
+`start` creates the named screen if it doesn't exist and waits until topology is verified; the reply includes its display ID and desktop bounds. `close` uses the same window recovery as the panel but never shows a dialog: if windows can't be returned, it keeps the screen and replies `failed` with the reason. `list` includes `inventory.ready`; the window list settles a moment after windows move, so poll `list` until `ready` is true before closing. Moving windows onto the screen stays with the agent's own tools. Each command prints one JSON line; exit status 0 means `ok`, `running` or `closed`, 2 a refusal or failure, 3 yomado not running.
+
 ## Version and updates
 
 The panel footer links to [yomado.app](https://yomado.app/), this GitHub repository and the MIT license, alongside the installed version. Click the refresh icon next to the version, or **Check and Install Updates…** (`检查并安装更新…`) in the menu-bar menu. The menu bar uses a transparent, monochrome silhouette of the night-window logo that follows the system appearance; the full app icon keeps its dark background.
