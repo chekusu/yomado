@@ -23,6 +23,22 @@ static void DurationFixtures(void) {
     Check(YMInputLeaseClampSeconds(@(90.4)) == 90, @"duration rounds to whole seconds");
 }
 
+static void DeadlineFixtures(void) {
+    NSDate *now = [NSDate dateWithTimeIntervalSince1970:1000];
+    NSDate *expiredLease = [NSDate dateWithTimeIntervalSince1970:999];
+    NSDate *expiredPrompt = [NSDate dateWithTimeIntervalSince1970:998];
+    NSDate *current = [NSDate dateWithTimeIntervalSince1970:1001];
+    Check(YMInputLeaseDeadlineExpired(expiredLease, now),
+          @"an expired lease deadline must be treated as ended by status transitions");
+    Check(!YMInputLeaseDeadlineExpired(current, now),
+          @"a current lease deadline remains active");
+    Check(YMInputLeaseDeadlineExpired(expiredPrompt, now),
+          @"an expired prompt deadline must reject a late approval");
+    Check(YMInputLeaseDeadlineExpired(nil, now),
+          @"a missing pending deadline fails closed");
+    Check(YMInputLeaseDeadlineExpired(now, now), @"the exact deadline is expired");
+}
+
 static void TextFixtures(void) {
     Check([YMInputLeaseDisplayText(nil, 40, @"fallback") isEqualToString:@"fallback"], @"missing text uses the fallback");
     Check([YMInputLeaseDisplayText(@42, 40, @"fallback") isEqualToString:@"fallback"], @"non-string text uses the fallback");
@@ -53,6 +69,7 @@ static void GeometryFixtures(void) {
 int main(void) {
     @autoreleasepool {
         DurationFixtures();
+        DeadlineFixtures();
         TextFixtures();
         GeometryFixtures();
         printf("Input lease policy: %lu checks, %lu failures\n", (unsigned long)checks, (unsigned long)failures);

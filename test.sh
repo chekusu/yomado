@@ -40,6 +40,14 @@ bash "$ym_root/scripts/test-app-workspace.sh"
   -o "$ym_stage/InputLeaseTests"
 "$ym_stage/InputLeaseTests"
 
+# Deterministic state-transition checks; no application, input or display is started.
+"$ym_clang" -fobjc-arc -Wall -Wextra -Werror -Wno-nullability-completeness \
+  -isysroot "$ym_sdk" -mmacosx-version-min=14.0 \
+  -ffile-prefix-map="$ym_root"=. -fmacro-prefix-map="$ym_root"=. \
+  -I "$ym_root/app" "$ym_root/tests/InputLeaseDeadlineTests.m" \
+  -framework AppKit -framework CoreGraphics -o "$ym_stage/InputLeaseDeadlineTests"
+"$ym_stage/InputLeaseDeadlineTests"
+
 # Foundation-only update policy and simulated transport tests.
 bash "$ym_root/scripts/test-updates.sh"
 bash "$ym_root/scripts/test-automatic-updater.sh"
