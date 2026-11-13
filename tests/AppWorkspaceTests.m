@@ -112,6 +112,35 @@ int main(void) {
         Check([First(result[@"windows"])[@"cgFrame"] isEqual:cg[@"frame"]], @"retain independent raw CG geometry");
         Check(YMWorkspaceSnapshotAllowsSource(result, @5), @"real source screen remains eligible");
 
+        // Native full screen: the toolbar strip is a separate CG window with no AX window.
+        NSDictionary *fsIdentity = @{@"pid": @77, @"windowID": @2001,
+            @"startSeconds": @1000, @"startMicroseconds": @7, @"bundleID": @"test.browser"};
+        NSDictionary *fsCG = @{@"pid": @77, @"windowID": @2001,
+            @"frame": Frame(0, 79, 1920, 1001), @"layer": @0, @"onScreen": @YES, @"alpha": @1};
+        NSDictionary *fsAX = @{@"identity": fsIdentity, @"frame": Frame(0, 79, 1920, 1001),
+            @"ordinary": @YES, @"minimized": @NO, @"readable": @YES, @"positionSettable": @NO};
+        NSDictionary *strip = @{@"pid": @77, @"windowID": @2002,
+            @"frame": Frame(0, 0, 1920, 158), @"layer": @0, @"onScreen": @YES, @"alpha": @1};
+        NSDictionary *fsResult = YMWorkspaceNormalizeWindowSnapshot(@[fsCG, strip], @[fsAX], YES, displays);
+        Check([fsResult[@"complete"] boolValue] && [fsResult[@"blockers"] count] == 0,
+            @"full-screen toolbar strip of the same app does not leave the inventory incomplete");
+        NSMutableDictionary *foreignStrip = [strip mutableCopy]; foreignStrip[@"pid"] = @78;
+        Check(![YMWorkspaceNormalizeWindowSnapshot(@[fsCG, foreignStrip], @[fsAX], YES, displays)[@"complete"] boolValue],
+            @"a strip from another app is still unknown");
+        NSMutableDictionary *tallStrip = [strip mutableCopy]; tallStrip[@"frame"] = Frame(0, 0, 1920, 400);
+        Check(![YMWorkspaceNormalizeWindowSnapshot(@[fsCG, tallStrip], @[fsAX], YES, displays)[@"complete"] boolValue],
+            @"a tall unmatched window is still unknown");
+        NSMutableDictionary *narrowStrip = [strip mutableCopy]; narrowStrip[@"frame"] = Frame(0, 0, 1200, 158);
+        Check(![YMWorkspaceNormalizeWindowSnapshot(@[fsCG, narrowStrip], @[fsAX], YES, displays)[@"complete"] boolValue],
+            @"a strip that does not span its display is still unknown");
+        NSMutableDictionary *windowed = [fsAX mutableCopy]; windowed[@"frame"] = Frame(100, 100, 1200, 800);
+        Check(![YMWorkspaceNormalizeWindowSnapshot(@[fsCG, strip], @[windowed], YES, displays)[@"complete"] boolValue],
+            @"without a full-screen window of the same app the strip is still unknown");
+        NSDictionary *ownAlert = @{@"pid": @(getpid()), @"windowID": @2003,
+            @"frame": Frame(600, 300, 260, 140), @"layer": @0, @"onScreen": @YES, @"alpha": @1};
+        Check([YMWorkspaceNormalizeWindowSnapshot(@[ownAlert], @[], YES, displays)[@"complete"] boolValue],
+            @"yomado's own alert does not block the retry it asks for");
+
         NSDictionary *largeCG = @{@"pid": @42, @"windowID": @1490,
             @"frame": Frame(15, 982, 150, 120), @"layer": @0, @"onScreen": @YES, @"alpha": @1};
         NSDictionary *largeResult = YMWorkspaceNormalizeWindowSnapshot(@[largeCG], @[ax], YES, displays);
