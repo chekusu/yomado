@@ -1177,9 +1177,10 @@ static NSString *YMElementValue(AXUIElementRef element) {
 - (NSRect)defaultPiPFrame {
     NSString *saved = [NSUserDefaults.standardUserDefaults stringForKey:YMPreviewPiPFrameKey];
     NSRect frame = saved.length ? NSRectFromString(saved) : NSZeroRect;
-    for (NSScreen *screen in NSScreen.screens)
-        if (frame.size.width >= 240 && NSContainsRect(screen.visibleFrame, frame)) return frame;
+    // Only reuse the saved frame on the dock's screen: the person just clicked
+    // there, and another screen may be covered by a full-screen app or unplugged.
     NSRect visible = [self dockScreen].visibleFrame;
+    if (frame.size.width >= 240 && NSContainsRect(visible, frame)) return frame;
     CGFloat width = 640, height = 360;
     return NSMakeRect(NSMaxX(visible) - width - YMTabWidth - 24, NSMinY(visible) + 24, width, height);
 }
@@ -1239,7 +1240,8 @@ static NSString *YMElementValue(AXUIElementRef element) {
     YMSetContents(self.pipView.picture, nil);
     YMPreviewSource *source = self.sources[ident];
     if (source) { [source attachLayer:self.pipView.picture]; source.live = YES; }
-    if (!self.pip.visible) {
+    if (!self.pip.visible || !NSIntersectsRect([self dockScreen].visibleFrame, self.pip.frame)) {
+        [self.pip setFrame:[self defaultPiPFrame] display:NO];
         self.pip.alphaValue = 0;
         [self.pip orderFrontRegardless];
         YMAnimate(0.2, ^{ self.pip.animator.alphaValue = 1; }, nil);
