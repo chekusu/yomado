@@ -40,9 +40,12 @@ def run(command, *, data=None, timeout=30):
 
 
 def check_guest(directory):
-    if not (os.environ.get("GITHUB_ACTIONS") == "true" and
-            os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted" and
-            os.environ.get("RUNNER_OS") == "macOS" and pwd.getpwuid(os.getuid()).pw_name == "runner"):
+    user = pwd.getpwuid(os.getuid()).pw_name
+    # GitHub's hosted macOS, or a Hayabuild job in a fresh VM of its own (runs-on: [hayabuild-macos, vm]).
+    hosted = os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted" and user == "runner"
+    hayabuild_vm = os.environ.get("HAYABUILD_DISPOSABLE_VM") == "1" and user == "admin"
+    if not (os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_OS") == "macOS" and
+            (hosted or hayabuild_vm)):
         raise RuntimeError("Refusing identity/permission changes outside a disposable hosted runner")
     temporary = Path(os.environ["RUNNER_TEMP"]).resolve()
     directory = Path(directory).resolve()

@@ -11,9 +11,15 @@ case "${YM_UPDATE_RUNTIME_CASE:-all}" in
   occupied) ym_cases=(occupied) ;;
   *) printf 'Unknown runtime acceptance scenario.\n' >&2; exit 2 ;;
 esac
-if [ "$ym_build_only" = false ] && { [ "${GITHUB_ACTIONS:-}" != true ] || \
-  [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] || [ "${RUNNER_OS:-}" != macOS ] || [ "$(id -un)" != runner ]; }; then
-  printf 'Refusing GUI/trust changes outside a disposable GitHub-hosted macOS runner. Use --build-only locally.\n' >&2
+# A disposable runner: GitHub's hosted macOS (user runner), or a Hayabuild job in a fresh VM of its own
+# (runs-on: [hayabuild-macos, vm]; the runner sets HAYABUILD_DISPOSABLE_VM=1 only there, user admin).
+ym_disposable_runner() {
+  [ "${GITHUB_ACTIONS:-}" = true ] && [ "${RUNNER_OS:-}" = macOS ] || return 1
+  { [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] && [ "$(id -un)" = runner ]; } || \
+    { [ "${HAYABUILD_DISPOSABLE_VM:-}" = 1 ] && [ "$(id -un)" = admin ]; }
+}
+if [ "$ym_build_only" = false ] && ! ym_disposable_runner; then
+  printf 'Refusing GUI/trust changes outside a disposable macOS runner (GitHub-hosted, or a Hayabuild VM). Use --build-only locally.\n' >&2
   exit 2
 fi
 printf '[update-runtime] build fixtures\n'
