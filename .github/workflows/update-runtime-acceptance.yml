@@ -25,13 +25,13 @@ jobs:
       - name: TEMP diagnose disposable VM (remove before ready)
         shell: bash {0}
         run: |
-          echo "== write as root (sudo)"; ( sudo -n security authorizationdb write com.apple.trust-settings.admin allow 2>&1 & p=$!; sleep 8; kill $p 2>/dev/null && echo "write: still running"; wait $p; echo "exit $?" )
-          echo "== write as root (bsexec 1)"; ( sudo -n launchctl bsexec 1 /usr/bin/security authorizationdb write com.apple.trust-settings.admin allow 2>&1 & p=$!; sleep 8; kill $p 2>/dev/null && echo "bsexec write: still running"; wait $p; echo "exit $?" )
-          sudo -n security authorizationdb read com.apple.trust-settings.admin 2>&1 | tr -d '\t\n'; echo
-          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=hb-diag -keyout "$RUNNER_TEMP/d.key" -out "$RUNNER_TEMP/d.crt" 2>/dev/null
-          echo "== user domain, no sudo"; ( security add-trusted-cert -r trustRoot -k "$HOME/Library/Keychains/login.keychain-db" "$RUNNER_TEMP/d.crt" 2>&1 & p=$!; sleep 8; ps -axo pid,user,comm | grep -i -E 'SecurityAgent|authorizationhost' | grep -v grep; kill $p 2>/dev/null && echo "user: still running"; wait $p; echo "exit $?" )
-          echo "== admin domain, sudo"; ( sudo -n security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$RUNNER_TEMP/d.crt" 2>&1 & p=$!; sleep 8; ps -axo pid,user,comm | grep -i -E 'SecurityAgent|authorizationhost|security' | grep -v grep; sudo -n log show --last 15s --predicate 'process == "authd" OR process == "trustd" OR process == "security"' 2>/dev/null | tail -25; kill $p 2>/dev/null && echo "admin: still running"; wait $p; echo "exit $?" )
-          echo "== admin domain, sudo, no GUI session (launchctl bsexec 1?)"; ( sudo -n launchctl bsexec 1 /usr/bin/security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$RUNNER_TEMP/d.crt" 2>&1 & p=$!; sleep 8; kill $p 2>/dev/null && echo "bsexec: still running"; wait $p; echo "exit $?" )
+          for db in "/Library/Application Support/com.apple.TCC/TCC.db" "$HOME/Library/Application Support/com.apple.TCC/TCC.db"; do
+            echo "== $db"
+            sudo -n sqlite3 "$db" "SELECT count(*) FROM access;" 2>&1
+            sudo -n sqlite3 "$db" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version,csreq,policy_id,indirect_object_identifier_type,indirect_object_identifier,indirect_object_code_identity,flags,last_modified) VALUES ('kTCCServiceScreenCapture','dev.chekusu.hb.diag',0,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,0);" 2>&1; echo "insert exit $?"
+            sudo -n sqlite3 "$db" "DELETE FROM access WHERE client='dev.chekusu.hb.diag';" 2>&1; echo "delete exit $?"
+          done
+          sudo -n ls -l /private/var/db/auth.db 2>&1
           exit 0
       - name: Record exact revision and run isolated update fixtures
         shell: bash
