@@ -25,6 +25,8 @@ jobs:
       - name: TEMP diagnose disposable VM (remove before ready)
         shell: bash {0}
         run: |
+          echo "== write as root (sudo)"; ( sudo -n security authorizationdb write com.apple.trust-settings.admin allow 2>&1 & p=$!; sleep 8; kill $p 2>/dev/null && echo "write: still running"; wait $p; echo "exit $?" )
+          echo "== write as root (bsexec 1)"; ( sudo -n launchctl bsexec 1 /usr/bin/security authorizationdb write com.apple.trust-settings.admin allow 2>&1 & p=$!; sleep 8; kill $p 2>/dev/null && echo "bsexec write: still running"; wait $p; echo "exit $?" )
           sudo -n security authorizationdb read com.apple.trust-settings.admin 2>&1 | tr -d '\t\n'; echo
           openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=hb-diag -keyout "$RUNNER_TEMP/d.key" -out "$RUNNER_TEMP/d.crt" 2>/dev/null
           echo "== user domain, no sudo"; ( security add-trusted-cert -r trustRoot -k "$HOME/Library/Keychains/login.keychain-db" "$RUNNER_TEMP/d.crt" 2>&1 & p=$!; sleep 8; ps -axo pid,user,comm | grep -i -E 'SecurityAgent|authorizationhost' | grep -v grep; kill $p 2>/dev/null && echo "user: still running"; wait $p; echo "exit $?" )
