@@ -22,17 +22,6 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: TEMP diagnose disposable VM (remove before ready)
-        shell: bash {0}
-        run: |
-          for db in "/Library/Application Support/com.apple.TCC/TCC.db" "$HOME/Library/Application Support/com.apple.TCC/TCC.db"; do
-            echo "== $db"
-            sudo -n sqlite3 "$db" "SELECT count(*) FROM access;" 2>&1
-            sudo -n sqlite3 "$db" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version,csreq,policy_id,indirect_object_identifier_type,indirect_object_identifier,indirect_object_code_identity,flags,last_modified) VALUES ('kTCCServiceScreenCapture','dev.chekusu.hb.diag',0,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,0);" 2>&1; echo "insert exit $?"
-            sudo -n sqlite3 "$db" "DELETE FROM access WHERE client='dev.chekusu.hb.diag';" 2>&1; echo "delete exit $?"
-          done
-          sudo -n ls -l /private/var/db/auth.db 2>&1
-          exit 0
       - name: Record exact revision and run isolated update fixtures
         shell: bash
         env:
