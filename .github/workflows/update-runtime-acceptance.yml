@@ -22,6 +22,16 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+      - name: TEMP diagnose disposable VM (remove before ready)
+        shell: bash
+        run: |
+          id; sw_vers; csrutil status || true
+          echo "HAYABUILD_DISPOSABLE_VM=${HAYABUILD_DISPOSABLE_VM:-} RUNNER_ENVIRONMENT=${RUNNER_ENVIRONMENT:-}"
+          sudo -n security authorizationdb read com.apple.trust-settings.admin 2>&1 | grep -A1 -E '<key>(rule|class)</key>' || true
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=hb-diag -keyout "$RUNNER_TEMP/d.key" -out "$RUNNER_TEMP/d.crt" 2>/dev/null
+          ( sudo -n security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$RUNNER_TEMP/d.crt" & p=$!; sleep 20; kill $p 2>/dev/null && echo "add-trusted-cert still running after 20 s"; wait $p; echo "exit $?" )
+          ps -axo pid,user,comm | grep -i -E 'SecurityAgent|authorizationhost' | grep -v grep || true
+          sudo -n security remove-trusted-cert -d "$RUNNER_TEMP/d.crt" 2>&1 || true
       - name: Record exact revision and run isolated update fixtures
         shell: bash
         env:
