@@ -30,6 +30,12 @@ jobs:
           mkdir -p test-output/update-runtime
           git rev-parse HEAD > test-output/update-runtime/revision.txt
           git diff --exit-code
+          # TEMPORARY diagnostics for the Hayabuild VM (remove before ready)
+          tcc="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
+          ls -le "$(dirname "$tcc")" || true
+          sudo -n sqlite3 "$tcc" 'PRAGMA table_info(access);' 2>&1 | tail -3 || true
+          ps -o pid,ppid,comm -p $$ -p $PPID || true
+          id || true
           bash scripts/test-update-runtime.sh "$GITHUB_WORKSPACE/test-output/update-runtime"
       - name: Collect acceptance evidence, excluding keys and application bundles
         if: always()
