@@ -27,11 +27,12 @@ mkdir -p "$ym_evidence"
 ym_evidence="$(cd "$ym_evidence" && pwd -P)"
 # In a Hayabuild VM the checkout and RUNNER_TEMP are on a virtiofs share, where ditto cannot copy symbolic links
 # ("Too many levels of symbolic links" on Sparkle.framework). Keep the fixtures on the VM's own disk there.
-ym_temp_root="$RUNNER_TEMP"
 if [ "$ym_build_only" = false ] && [ "${HAYABUILD_DISPOSABLE_VM:-}" = 1 ]; then
-  ym_temp_root=/private/var/tmp
-  export YOMADO_DEPS_DIR="${YOMADO_DEPS_DIR:-$ym_temp_root/yomado-build-deps}"
+  export RUNNER_TEMP=/private/var/tmp/yomado-runner-temp
+  mkdir -p "$RUNNER_TEMP"
+  export YOMADO_DEPS_DIR="${YOMADO_DEPS_DIR:-/private/var/tmp/yomado-build-deps}"
 fi
+ym_temp_root="$RUNNER_TEMP"
 ym_sparkle="$("$ym_root/scripts/fetch-sparkle.sh")"
 xcrun clang -fobjc-arc -Wall -Wextra -Werror -g0 -mmacosx-version-min=14.0 \
   -ffile-prefix-map="$ym_root"=. -fmacro-prefix-map="$ym_root"=. \
