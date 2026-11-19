@@ -25,6 +25,13 @@ fi
 printf '[update-runtime] build fixtures\n'
 mkdir -p "$ym_evidence"
 ym_evidence="$(cd "$ym_evidence" && pwd -P)"
+# In a Hayabuild VM the checkout and RUNNER_TEMP are on a virtiofs share, where ditto cannot copy symbolic links
+# ("Too many levels of symbolic links" on Sparkle.framework). Keep the fixtures on the VM's own disk there.
+ym_temp_root="$RUNNER_TEMP"
+if [ "$ym_build_only" = false ] && [ "${HAYABUILD_DISPOSABLE_VM:-}" = 1 ]; then
+  ym_temp_root=/private/var/tmp
+  export YOMADO_DEPS_DIR="${YOMADO_DEPS_DIR:-$ym_temp_root/yomado-build-deps}"
+fi
 ym_sparkle="$("$ym_root/scripts/fetch-sparkle.sh")"
 xcrun clang -fobjc-arc -Wall -Wextra -Werror -g0 -mmacosx-version-min=14.0 \
   -ffile-prefix-map="$ym_root"=. -fmacro-prefix-map="$ym_root"=. \
@@ -41,7 +48,7 @@ xcrun clang -fobjc-arc -Wall -Wextra -Werror -g0 -mmacosx-version-min=14.0 \
   -o "$ym_evidence/UpdateRuntimeWindow"
 if [ "$ym_build_only" = true ]; then printf 'Fixture compiled; no application was launched.\n'; exit 0; fi
 
-ym_temporary="$(mktemp -d "$RUNNER_TEMP/yomado-update-runtime.XXXXXX")"
+ym_temporary="$(mktemp -d "$ym_temp_root/yomado-update-runtime.XXXXXX")"
 ym_ca_name="yomado CI Update Test ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 ym_server_pid=""
 ym_fixture_pid=""
