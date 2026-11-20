@@ -24,6 +24,13 @@ static const NSTimeInterval YMInputLeaseDecisionSeconds = 60;
 static const NSUInteger YMInputLeaseAgentLength = 40;
 static const NSUInteger YMInputLeaseReasonLength = 160;
 
+// Timer callbacks are only for presentation and cleanup. State transitions
+// must make their decision against the current deadline even when the run loop
+// has delayed a timer. Missing dates fail closed while a state is pending.
+static inline BOOL YMInputLeaseDeadlineExpired(NSDate *deadline, NSDate *now) {
+    return !deadline || !now || [deadline compare:now] != NSOrderedDescending;
+}
+
 static inline NSTimeInterval YMInputLeaseClampSeconds(id requested) {
     if (![requested isKindOfClass:NSNumber.class]) return YMInputLeaseDefaultSeconds;
     double seconds = [requested doubleValue];
