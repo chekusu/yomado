@@ -28,6 +28,16 @@ static NSDictionary *FIdentity(pid_t pid, NSError **error) {
     if (!identity) FFail(error,2,@"Could not resolve the exact fixture process and window.");
     return identity;
 }
+// The window apps are started by the script, not by this process: their NSRunningApplication entry (and so their
+// bundle identity) can reach this process a moment after their window exists (seen in a fresh Hayabuild VM). Give the
+// run loop up to 3 s to deliver it before failing.
+static NSDictionary *FIdentityWaiting(pid_t pid, NSError **error) {
+    for (NSUInteger attempt=0;;attempt++) {
+        NSError *failure=nil; NSDictionary *identity=FIdentity(pid,&failure);
+        if (identity || attempt>=30) { if (!identity && error) *error=failure; return identity; }
+        [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+    }
+}
 static NSDictionary *FWindowDiagnostic(NSDictionary *window) {
     if (!window) return @{};
     NSDictionary *identity=window[@"identity"] ?: @{};
@@ -231,7 +241,7 @@ static NSDictionary *FAXApplicationDiagnostic(pid_t pid) {
     if (!AXIsProcessTrusted() || !VDVirtualDisplay.isAPIAvailable) {
         FFail(&error,3,@"Guest Accessibility or virtual-display support is unavailable."); completion(NO,error); return;
     }
-    NSDictionary *workIdentity=FIdentity(self.workPID,&error), *probeIdentity=FIdentity(self.probePID,&error);
+    NSDictionary *workIdentity=FIdentityWaiting(self.workPID,&error), *probeIdentity=FIdentityWaiting(self.probePID,&error);
     NSDictionary *work=workIdentity ? [self.backend readWindow:workIdentity error:&error] : nil;
     NSDictionary *probe=probeIdentity ? [self.backend readWindow:probeIdentity error:&error] : nil;
     NSDictionary *state=[self.backend captureWithProfiles:@[] error:&error];

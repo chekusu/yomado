@@ -11,14 +11,31 @@ case "${YM_UPDATE_RUNTIME_CASE:-all}" in
   occupied) ym_cases=(occupied) ;;
   *) printf 'Unknown runtime acceptance scenario.\n' >&2; exit 2 ;;
 esac
-if [ "$ym_build_only" = false ] && { [ "${GITHUB_ACTIONS:-}" != true ] || \
-  [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] || [ "${RUNNER_OS:-}" != macOS ] || [ "$(id -un)" != runner ]; }; then
-  printf 'Refusing GUI/trust changes outside a disposable GitHub-hosted macOS runner. Use --build-only locally.\n' >&2
+# A disposable runner: GitHub's hosted macOS (user runner), or a Hayabuild job in a fresh VM of its own
+# (runs-on: [hayabuild-macos, vm]; the runner sets HAYABUILD_DISPOSABLE_VM=1 only there, user admin).
+ym_disposable_runner() {
+  [ "${GITHUB_ACTIONS:-}" = true ] && [ "${RUNNER_OS:-}" = macOS ] || return 1
+  { [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] && [ "$(id -un)" = runner ]; } || \
+    { [ "${HAYABUILD_DISPOSABLE_VM:-}" = 1 ] && [ "$(id -un)" = admin ]; }
+}
+if [ "$ym_build_only" = false ] && ! ym_disposable_runner; then
+  printf 'Refusing GUI/trust changes outside a disposable macOS runner (GitHub-hosted, or a Hayabuild VM). Use --build-only locally.\n' >&2
   exit 2
 fi
 printf '[update-runtime] build fixtures\n'
 mkdir -p "$ym_evidence"
 ym_evidence="$(cd "$ym_evidence" && pwd -P)"
+# In a Hayabuild VM the checkout and RUNNER_TEMP are on a virtiofs share, where ditto cannot copy symbolic links
+# ("Too many levels of symbolic links" on Sparkle.framework). Keep the fixtures on the VM's own disk there.
+if [ "$ym_build_only" = false ] && [ "${HAYABUILD_DISPOSABLE_VM:-}" = 1 ]; then
+  # /private/var/tmp is root:wheel and new files take their folder's group; the updater only installs over a bundle
+  # whose group is one of the user's, as under RUNNER_TEMP, so these folders get the user's group.
+  export RUNNER_TEMP=/private/var/tmp/yomado-runner-temp
+  export YOMADO_DEPS_DIR="${YOMADO_DEPS_DIR:-/private/var/tmp/yomado-build-deps}"
+  mkdir -p "$RUNNER_TEMP" "$YOMADO_DEPS_DIR"
+  chgrp "$(id -g)" "$RUNNER_TEMP" "$YOMADO_DEPS_DIR"
+fi
+ym_temp_root="$RUNNER_TEMP"
 ym_sparkle="$("$ym_root/scripts/fetch-sparkle.sh")"
 xcrun clang -fobjc-arc -Wall -Wextra -Werror -g0 -mmacosx-version-min=14.0 \
   -ffile-prefix-map="$ym_root"=. -fmacro-prefix-map="$ym_root"=. \
@@ -35,7 +52,7 @@ xcrun clang -fobjc-arc -Wall -Wextra -Werror -g0 -mmacosx-version-min=14.0 \
   -o "$ym_evidence/UpdateRuntimeWindow"
 if [ "$ym_build_only" = true ]; then printf 'Fixture compiled; no application was launched.\n'; exit 0; fi
 
-ym_temporary="$(mktemp -d "$RUNNER_TEMP/yomado-update-runtime.XXXXXX")"
+ym_temporary="$(mktemp -d "$ym_temp_root/yomado-update-runtime.XXXXXX")"
 ym_ca_name="yomado CI Update Test ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 ym_server_pid=""
 ym_fixture_pid=""

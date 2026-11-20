@@ -40,9 +40,12 @@ def run(command, *, data=None, timeout=30):
 
 
 def check_guest(directory):
-    if not (os.environ.get("GITHUB_ACTIONS") == "true" and
-            os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted" and
-            os.environ.get("RUNNER_OS") == "macOS" and pwd.getpwuid(os.getuid()).pw_name == "runner"):
+    user = pwd.getpwuid(os.getuid()).pw_name
+    # GitHub's hosted macOS, or a Hayabuild job in a fresh VM of its own (runs-on: [hayabuild-macos, vm]).
+    hosted = os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted" and user == "runner"
+    hayabuild_vm = os.environ.get("HAYABUILD_DISPOSABLE_VM") == "1" and user == "admin"
+    if not (os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_OS") == "macOS" and
+            (hosted or hayabuild_vm)):
         raise RuntimeError("Refusing identity/permission changes outside a disposable hosted runner")
     temporary = Path(os.environ["RUNNER_TEMP"]).resolve()
     directory = Path(directory).resolve()
@@ -192,6 +195,11 @@ def grant(directory, old, new, evidence):
     databases = [("system", Path("/Library/Application Support/com.apple.TCC/TCC.db")),
                  ("user", Path.home() / "Library/Application Support/com.apple.TCC/TCC.db")]
     for label, database in databases:
+        if label == "user" and not database.exists():
+            # A fresh VM whose user never had a TCC prompt has no per-user database yet (Hayabuild VM); the system
+            # database above holds both grants, so there is nothing to add here.
+            report["databases"].append({"scope": label, "present": False})
+            continue
         schema = json.loads(run(["sudo", "-n", "sqlite3", "-json", str(database), "PRAGMA table_info(access);"])[0])
         columns = {row["name"] for row in schema}
         required = {"service", "client", "client_type", "auth_value", "auth_reason", "auth_version", "csreq"}
