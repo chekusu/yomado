@@ -108,10 +108,42 @@ static void PrivacyFixtures(void) {
           @"null and nil roots remain unchanged");
 }
 
+static NSDictionary *Output(unsigned displayID, BOOL active, BOOL isVirtual, BOOL mirrored, unsigned serial) {
+    return @{@"displayID": @(displayID), @"isActive": @(active), @"isVirtual": @(isVirtual),
+             @"isInMirrorSet": @(mirrored), @"vendorID": @1552, @"modelNumber": @44, @"serialNumber": @(serial)};
+}
+
+static void OutputFixtures(void) {
+    NSArray *targets = YMPhysicalOutputTargets(@[Output(9, YES, NO, NO, 7), Output(3, YES, NO, NO, 8),
+                                                  Output(12, YES, YES, NO, 0), Output(5, NO, NO, NO, 9)]);
+    Check([[targets valueForKey:@"displayID"] isEqualToArray:(@[@3, @9])],
+          @"only active physical outputs are targets, sorted by ID");
+    Check(YMPhysicalOutputTargets(@[Output(3, YES, NO, YES, 8)]) == nil, @"a mirrored physical output refuses");
+    Check(YMPhysicalOutputTargets(@[Output(3, YES, YES, YES, 0)]).count == 0, @"a mirrored virtual display is ignored");
+    Check(YMPhysicalOutputTargets(@[(NSDictionary *)(id)@"bad"]) == nil, @"a malformed snapshot refuses");
+    Check(![YMPhysicalOutputTargets(@[Output(3, YES, NO, NO, 8)])
+              isEqualToArray:YMPhysicalOutputTargets(@[Output(3, YES, NO, NO, 99)])],
+          @"a reused display ID with another serial is a different target");
+    Check([YMPhysicalOutputTargets(@[Output(3, YES, NO, NO, 8), Output(12, YES, YES, NO, 0)])
+              isEqualToArray:YMPhysicalOutputTargets(@[Output(12, YES, YES, NO, 0), Output(3, YES, NO, NO, 8)])],
+          @"snapshot order does not change the targets");
+
+    Check(YMOutputRestoreStepFor(0, 0, 0) == YMOutputRestoreDone, @"all targets active finishes at once");
+    Check(YMOutputRestoreStepFor(1, 0, 30) == YMOutputRestoreWait, @"a dark connected target keeps waiting");
+    Check(YMOutputRestoreStepFor(1, 0, 60) == YMOutputRestoreGiveUp, @"automatic retries stop after a minute");
+    Check(YMOutputRestoreStepFor(0, 1, 2) == YMOutputRestoreWait, @"an offline target gets a few seconds");
+    Check(YMOutputRestoreStepFor(0, 1, 5) == YMOutputRestoreDone, @"an unplugged target does not block recovery");
+    Check(YMOutputRestoreStepFor(1, 1, 10) == YMOutputRestoreWait, @"an unplugged target does not end the wait for another");
+    Check(!YMRestoreDeadlineReached(59.99), @"layout recovery remains retryable before the deadline");
+    Check(YMRestoreDeadlineReached(60), @"layout recovery stalls at the deadline");
+    Check(YMRestoreDeadlineReached(INFINITY), @"non-finite recovery elapsed time fails closed at the deadline");
+}
+
 int main(void) {
     @autoreleasepool {
         LayoutFixtures();
         PrivacyFixtures();
+        OutputFixtures();
         if (failures) {
             fprintf(stderr, "%lu of %lu policy checks failed.\n", (unsigned long)failures, (unsigned long)checks);
             return 1;
