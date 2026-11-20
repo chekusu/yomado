@@ -6,6 +6,7 @@
 
 extern BOOL YMUpdateIsVerifiedMenuCursorChrome(NSDictionary *candidate, NSDictionary *displayBounds,
     double topInset, NSInteger mainMenuLevel, NSDictionary *systemMenu, NSInteger cursorLevel);
+extern BOOL YMUpdateIsPointerSurface(NSDictionary *candidate, NSInteger cursorLevel, BOOL windowServer);
 
 static NSUInteger checks=0;
 static void Check(BOOL value, NSString *name) { checks++; if (!value) { fprintf(stderr,"FAIL %s\n",name.UTF8String); exit(1); } }
@@ -450,4 +451,25 @@ static void CursorMenuChromeClassification(void) {
             @"unknown, application, oversized, or even slightly out-of-band surfaces remain blocked");
     }
 }
-int main(void) { @autoreleasepool { MainRoundtrip();FinalGateChanges();StartupAndRestoreGates();ReadFailureDiagnostics();RetryAndPrivacy();EmptyAndPartial();GeometryAndOriginSelection();MalformedShapes();LastMomentGuards();CancellationOwnership();MenuChromeClassification();CursorMenuChromeClassification();printf("UpdateWorkspaceRecovery: %lu checks passed\n",(unsigned long)checks); } return 0; }
+static void PointerSurfaceClassification(void) {
+    NSInteger cursorLevel=2147483630;
+    // Observed in a Hayabuild VM: the pointer straddling the edge between the main display and an owned one.
+    NSDictionary *pointer=@{@"pid":@163,@"windowID":@96,@"frame":Frame(1896,1,28,28),@"layer":@(cursorLevel),@"onscreen":@YES};
+    Check(YMUpdateIsPointerSurface(pointer,cursorLevel,YES),@"the pointer across an owned display's edge is not a window");
+    for (NSDictionary *frame in @[Frame(3176,1,28,28),Frame(0,0,64,64),Frame(10,10,32,33)]) {
+        NSMutableDictionary *copy=pointer.mutableCopy;copy[@"frame"]=frame;
+        Check(YMUpdateIsPointerSurface(copy,cursorLevel,YES),@"pointer-sized WindowServer cursor surfaces anywhere are ignored");
+    }
+    Check(!YMUpdateIsPointerSurface(pointer,cursorLevel,NO),@"an app's surface at the cursor level still blocks");
+    for (NSDictionary *frame in @[Frame(1896,1,65,65),Frame(1896,1,28,40),Frame(1896,1,0,0)]) {
+        NSMutableDictionary *copy=pointer.mutableCopy;copy[@"frame"]=frame;
+        Check(!YMUpdateIsPointerSurface(copy,cursorLevel,YES),@"large, non-square or empty surfaces still block");
+    }
+    for (NSNumber *layer in @[@0,@24,@(cursorLevel-1),@(cursorLevel+1)]) {
+        NSMutableDictionary *copy=pointer.mutableCopy;copy[@"layer"]=layer;
+        Check(!YMUpdateIsPointerSurface(copy,cursorLevel,YES),@"only the exact cursor level is the pointer");
+    }
+    Check(!YMUpdateIsPointerSurface(pointer,0,YES),@"an unknown cursor level ignores nothing");
+    Check(!YMUpdateIsPointerSurface((NSDictionary *)@[],cursorLevel,YES),@"malformed metadata is not the pointer");
+}
+int main(void) { @autoreleasepool { MainRoundtrip();FinalGateChanges();StartupAndRestoreGates();ReadFailureDiagnostics();RetryAndPrivacy();EmptyAndPartial();GeometryAndOriginSelection();MalformedShapes();LastMomentGuards();CancellationOwnership();MenuChromeClassification();CursorMenuChromeClassification();PointerSurfaceClassification();printf("UpdateWorkspaceRecovery: %lu checks passed\n",(unsigned long)checks); } return 0; }

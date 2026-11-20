@@ -30,6 +30,7 @@ jobs:
           mkdir -p test-output/update-runtime
           git rev-parse HEAD > test-output/update-runtime/revision.txt
           git diff --exit-code
+          bash scripts/test-update-workspace-recovery.sh  # TEMPORARY: unit checks for the pointer change (remove before ready)
           bash scripts/test-update-runtime.sh "$GITHUB_WORKSPACE/test-output/update-runtime"
       - name: Collect acceptance evidence, excluding keys and application bundles
         if: always()

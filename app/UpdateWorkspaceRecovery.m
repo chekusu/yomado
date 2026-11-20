@@ -130,6 +130,16 @@ static BOOL USystemMenuMatchesDisplay(NSDictionary *systemMenu, NSDictionary *di
 }
 // Pure classification, with the system cursor level supplied by the caller.
 // These small WindowServer surfaces hold no application workspace to restore.
+// The mouse pointer: WindowServer's own small square surface at the cursor level. It holds no work, moves on its
+// own and is never restored, so it may sit anywhere, even across an owned display's edge, without pausing an update.
+// Only WindowServer's surfaces at exactly the cursor level and at most 64 points square qualify; anything else at a
+// high level still blocks.
+BOOL YMUpdateIsPointerSurface(NSDictionary *candidate, NSInteger cursorLevel, BOOL windowServer) {
+    if (!windowServer || ![candidate isKindOfClass:NSDictionary.class] || cursorLevel<=0 ||
+        !YMWorkspaceGeometry(candidate[@"frame"]) || ![candidate[@"layer"] isEqual:@(cursorLevel)]) return NO;
+    double width=[candidate[@"frame"][@"width"] doubleValue], height=[candidate[@"frame"][@"height"] doubleValue];
+    return width>=1 && height>=1 && width<=64 && height<=64 && fabs(width-height)<=1;
+}
 BOOL YMUpdateIsVerifiedMenuCursorChrome(NSDictionary *candidate, NSDictionary *displayBounds,
     double topInset, NSInteger mainMenuLevel, NSDictionary *systemMenu, NSInteger cursorLevel) {
     if (![candidate isKindOfClass:NSDictionary.class] || !YMWorkspaceGeometry(candidate[@"frame"]) ||
@@ -369,6 +379,7 @@ static NSArray *UDisplays(NSError **error) {
         // Hidden layer-zero windows remain uncertain and therefore block.
         if (![entry[(__bridge NSString *)kCGWindowIsOnscreen] boolValue] &&
             [entry[(__bridge NSString *)kCGWindowLayer] integerValue] != 0) continue;
+        if (YMUpdateIsPointerSurface(UCGWindowMetadata(entry),cursorLevel,UIsSystemWindowServer(pid))) continue;
         YMUpdateOwnedWindowRelation relation=YMUpdateWindowRelationToOwnedDisplays(frame,owned);
         if (relation==YMUpdateWindowOutsideOwned) continue;
         if (relation==YMUpdateWindowCrossesOwnedBoundary) {
