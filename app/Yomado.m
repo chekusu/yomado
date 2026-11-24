@@ -2737,6 +2737,10 @@ static const NSTimeInterval YMDisplayCommandSeconds = 45;
 // verified inventory first. The close itself runs without dialogs; a refusal
 // is detected as soon as stop: returns and reported in the reply right away.
 - (void)displayCommandClose:(YMManagedDisplay *)profile requestID:(NSString *)requestID deadline:(NSDate *)deadline {
+    if (self.selectedProfile != profile || self.virtualDisplay != profile.display) {
+        [self displayCommandRespond:requestID status:@"busy" extra:@{@"message":@"The selected display changed while waiting to close."}];
+        return;
+    }
     [self.appWorkspace refreshInventory];
     BOOL ready = [self.appWorkspace inventoryReadyForClosingDisplayID:profile.display.displayID];
     if (!ready && deadline.timeIntervalSinceNow > 10) {

@@ -1,0 +1,22 @@
+name: Display controller safety
+on:
+  pull_request:
+    paths:
+      - app/Yomado.m
+      - tests/ControllerSafetyTests.m
+      - scripts/test-controller-safety.sh
+      - .github/workflows/controller-safety.yml
+permissions:
+  contents: read
+concurrency:
+  group: controller-safety-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  controller:
+    runs-on: [hayabuild-macos]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - run: bash scripts/test-controller-safety.sh
