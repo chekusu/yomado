@@ -105,6 +105,80 @@ static void CheckFits(NSString *scenario, ADController *controller, NSArray<NSDi
     printf("PASS %s: %lu proportional tiles fit without scrollers\n", scenario.UTF8String, (unsigned long)snapshot.count);
 }
 
+static void CheckOutputRecoveryPanel(ADController *controller, NSString *state, NSString *pill) {
+    Settle(controller, NSMakeSize(760, 520));
+    CheckWindowKept(state, controller, NSMakeSize(760, 520));
+    NSView *content = controller.window.contentView;
+    NSView *row = controller.outputRecoveryStatusRow;
+    NSRect visible = [row convertRect:row.bounds toView:content];
+    BOOL labelsVisible = !controller.statusLabel.isHiddenOrHasHiddenAncestor
+        && !controller.detailLabel.isHiddenOrHasHiddenAncestor;
+    BOOL attached = [controller.statusLabel isDescendantOf:content]
+        && [controller.detailLabel isDescendantOf:content];
+    if (!row || row.hidden || !labelsVisible || !attached || NSHeight(visible) <= 0
+        || !NSContainsRect(NSInsetRect(content.bounds, -0.5, -0.5), visible)
+        || ![controller.statusPill.text isEqualToString:pill]) {
+        fprintf(stderr, "FAIL output recovery %s: hidden=%d labels=%d attached=%d row=%s pill=%s\n",
+                state.UTF8String, row.hidden, labelsVisible, attached, NSStringFromRect(visible).UTF8String,
+                controller.statusPill.text.UTF8String);
+        exit(1);
+    }
+    scenarios++;
+    printf("PASS output recovery %s: messages visible, minimum window keeps its size\n", state.UTF8String);
+}
+
+static void OutputRecoveryPanelFixtures(NSScrollerStyle style) {
+    ADController *controller = Panel(ThreeMixed(), style, YES);
+    Settle(controller, NSMakeSize(760, 520));
+    if (!controller.outputRecoveryStatusRow.hidden
+        || ![controller.statusLabel isDescendantOf:controller.window.contentView]
+        || ![controller.detailLabel isDescendantOf:controller.window.contentView]) {
+        fprintf(stderr, "FAIL output recovery: idle hides attached recovery messages\n");
+        exit(1);
+    }
+
+    controller.preparing = YES;
+    controller.statusLabel.stringValue = @"准备虚拟主屏与自动恢复…";
+    controller.detailLabel.stringValue = @"正在核对显示器与独立恢复进程。";
+    [controller updateOutputRecoveryPresentation];
+    CheckOutputRecoveryPanel(controller, @"preparing", @"准备关闭实体屏…");
+
+    controller.preparing = NO;
+    controller.armed = controller.layoutChangedForTrial = YES;
+    controller.statusLabel.stringValue = @"虚拟桌面运行中 · 实体屏已断开输出";
+    controller.detailLabel.stringValue = @"恢复：⌃⌥⌘R，或菜单栏「恢复实体显示器」。";
+    [controller updateOutputRecoveryPresentation];
+    CheckOutputRecoveryPanel(controller, @"outputs off", @"实体屏已关闭");
+
+    controller.restoring = controller.recoveryRequested = YES;
+    controller.statusLabel.stringValue = @"等待实体屏恢复…";
+    [controller updateOutputRecoveryPresentation];
+    CheckOutputRecoveryPanel(controller, @"restoring", @"恢复实体屏…");
+
+    // This invokes the production failure transition. Preview mode prevents
+    // showWindow: from ordering the synthetic panel front or activating it.
+    [controller stallRestore];
+    if (![controller.statusLabel.stringValue isEqualToString:@"实体屏恢复未完成"]
+        || ![controller.detailLabel.stringValue containsString:@"⌃⌥⌘R"]
+        || ![controller.detailLabel.stringValue containsString:@"恢复实体显示器"]) {
+        fprintf(stderr, "FAIL output recovery: stalled recovery gives a manual retry path\n");
+        exit(1);
+    }
+    CheckOutputRecoveryPanel(controller, @"stalled", @"实体屏待恢复");
+
+    controller.armed = controller.layoutChangedForTrial = controller.restoreStalled = NO;
+    [controller updateInventory];
+    Settle(controller, NSMakeSize(760, 520));
+    CheckWindowKept(@"output recovery finished", controller, NSMakeSize(760, 520));
+    if (!controller.outputRecoveryStatusRow.hidden) {
+        fprintf(stderr, "FAIL output recovery: completion hides transient recovery messages\n");
+        exit(1);
+    }
+    scenarios++;
+    printf("PASS output recovery idle/completed: transient messages hidden\n");
+    [controller.window close];
+}
+
 int main(void) {
     @autoreleasepool {
         [NSApplication sharedApplication];
@@ -119,6 +193,7 @@ int main(void) {
         NSArray<NSValue *> *sizes = @[[NSValue valueWithSize:NSMakeSize(1000, 620)], [NSValue valueWithSize:NSMakeSize(760, 520)]];
         for (NSNumber *style in @[@(NSScrollerStyleOverlay), @(NSScrollerStyleLegacy)]) {
             NSString *styleName = style.integerValue == NSScrollerStyleLegacy ? @"legacy" : @"overlay";
+            OutputRecoveryPanelFixtures(style.integerValue);
             for (NSString *name in [layouts.allKeys sortedArrayUsingSelector:@selector(compare:)])
                 for (NSValue *size in sizes)
                     for (NSNumber *statusRow in @[@NO, @YES]) {
