@@ -8,9 +8,12 @@ on:
       - .github/workflows/controller-safety.yml
 permissions:
   contents: read
+concurrency:
+  group: controller-safety-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   controller:
-    runs-on: [hayabuild-macos, vm]
+    runs-on: [hayabuild-macos]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
