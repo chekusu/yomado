@@ -722,6 +722,11 @@ int main(void) {
         Expect(NSApp == nil,"tests begin without NSApplication");
         YMFakeTopology *t; YMFakeDisplay *d; YMManagedDisplay *p,*s;
         YMFakeController *c = Controller(&t,&d,&p,&s);
+        // Resume a pending CLI close after the person selected the other live display.
+        [c selectProfile:s];
+        [c displayCommandClose:p requestID:@"fixture-close" deadline:NSDate.date];
+        Expect(c.stopCalls == 0 && s.display.isCreated, "delayed close keeps the newly selected display");
+        [c selectProfile:p];
         __weak YMFakeController *weakC=c; __weak YMManagedDisplay *weakP=p;
         t.duringCapture=^{Expect(weakC.displayOperationInProgress,"busy begins before capture");};
         t.duringConfigure=^{Expect(weakC.displayOperationInProgress,"busy during configure"); Expect(![weakC canMoveIntoProfile:weakP],"no admission during configure");};
